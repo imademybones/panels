@@ -190,6 +190,12 @@
     transition:transform .12s ease;opacity:.7;
   }
   .row-search:active{transform:scale(0.8);}
+  .row-read{
+    background:none;border:none;font-size:16px;line-height:1;color:var(--muted);
+    cursor:pointer;padding:6px;flex-shrink:0;transition:transform .12s ease;
+  }
+  .row-read.active{color:var(--accent);}
+  .row-read:active{transform:scale(0.8);}
   .badge{
     font-size:10px;font-weight:800;letter-spacing:.03em;color:var(--accent);
     background:var(--accent-soft);padding:1px 6px;border-radius:5px;
@@ -693,6 +699,7 @@
     const p = progressMap[item.id];
     const cover = !isFolder && coverUrl(p);
     const isFavorite = isFolder ? favoriteFolderIds.has(item.id) : !!(p && p['Favorite']);
+    const isFinished = !isFolder && !!(p && p['Finished']);
     row.innerHTML = `
       <div class="icon">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />` : (isFolder ? '📁' : '📕')}</div>
       <div class="info">
@@ -704,6 +711,7 @@
         ${p && p['Total Pages'] ? `<div class="progress-track"><div class="progress-fill" style="width:${Math.min(100, Math.round(100 * (p['Last Page'] || 0) / p['Total Pages']))}%"></div></div>` : ''}
       </div>
       <a class="row-search" href="${escapeHtml(lcgSearchUrl(item.name))}" target="_blank" rel="noopener" aria-label="Search on League of Comic Geeks">🔍</a>
+      ${isFolder ? '' : `<button class="row-read ${isFinished ? 'active' : ''}" aria-label="${isFinished ? 'Mark as unread' : 'Mark as read'}">${isFinished ? '✓' : '○'}</button>`}
       <button class="row-star ${isFavorite ? 'active' : ''}" aria-label="Favorite">${isFavorite ? '★' : '☆'}</button>
     `;
     row.addEventListener('click', () => {
@@ -716,6 +724,12 @@
       else toggleFavoriteRow(item, e.currentTarget, isFavorite);
     });
     row.querySelector('.row-search').addEventListener('click', (e) => e.stopPropagation());
+    if (!isFolder) {
+      row.querySelector('.row-read').addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleReadStatus(item, e.currentTarget, isFinished);
+      });
+    }
     return row;
   }
 
@@ -986,7 +1000,7 @@
       if (!resp.ok) { wrap.innerHTML = ''; return; }
       const data = await resp.json();
       let records = (data.records || [])
-        .filter(r => r.fields['Last Opened'] && !r.fields['Dismissed'])
+        .filter(r => r.fields['Last Opened'] && !r.fields['Dismissed'] && !r.fields['Finished'])
         .sort((a, b) => new Date(b.fields['Last Opened']) - new Date(a.fields['Last Opened']))
         .slice(0, 8);
       if (records.length === 0) { wrap.innerHTML = ''; return; }
@@ -1135,6 +1149,35 @@
       'Favorite': newVal,
     });
     loadFavoritesShelf();
+  }
+
+  // Manual read/unread override — for comics you finished elsewhere, or
+  // want off your Continue Reading shelf without actually reading them.
+  // "Unread" reuses the existing Dismissed mechanism to drop it from
+  // Continue Reading; it doesn't touch Last Page, so resuming still
+  // picks up wherever you'd actually gotten to.
+  function toggleReadStatus(item, btn, currentlyFinished) {
+    const newVal = !currentlyFinished;
+    btn.classList.toggle('active', newVal);
+    btn.textContent = newVal ? '✓' : '○';
+    btn.setAttribute('aria-label', newVal ? 'Mark as unread' : 'Mark as read');
+    if (newVal) {
+      saveProgress({
+        'Drive File ID': item.id,
+        'Title': stripExt(item.name),
+        'Format': formatOf(item.name),
+        'Finished': true,
+        'Finished Date': todayISO(),
+      });
+    } else {
+      saveProgress({
+        'Drive File ID': item.id,
+        'Finished': false,
+        'Finished Date': null,
+        'Dismissed': true,
+      });
+    }
+    loadContinueReading();
   }
 
   // -------------------------------------------------------------------
