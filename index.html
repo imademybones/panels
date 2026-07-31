@@ -345,6 +345,7 @@
 
   <main class="scroll" id="library-main">
     <div class="streak-goal-card" id="streak-goal-card"></div>
+    <div id="nextup-shelf-wrap"></div>
     <div id="recent-shelf-wrap"></div>
     <div id="favorites-shelf-wrap"></div>
     <div id="continue-shelf-wrap"></div>
@@ -630,6 +631,7 @@
     showView('library');
     renderBreadcrumb();
     loadReadingLogAndSettings();
+    loadNextUpShelf();
     loadRecentShelf();
     loadFavoritesShelf();
     loadContinueReading();
@@ -683,6 +685,52 @@
         pageSize: '50',
       });
       return (data.files || []).filter((f) => isComicFile(f.name)).slice(0, limit);
+    } catch (e) {
+      return [];
+    }
+  }
+
+  // Panels has no real publication-date metadata (Drive's createdTime
+  // only means "when it was added," not when the issue actually came
+  // out) — but scan filenames usually carry the year in parens, e.g.
+  // "Absolute Batman 001 (2024) (Webrip) (...)". Takes the first
+  // plausible one, left to right, matching how it's conventionally
+  // placed right after the title/issue number.
+  function parseReleaseYear(name) {
+    const years = [...name.matchAll(/\((\d{4})\)/g)]
+      .map((m) => parseInt(m[1], 10))
+      .filter((y) => y >= 1930 && y <= new Date().getFullYear() + 1);
+    return years.length > 0 ? years[0] : null;
+  }
+
+  // Comics you haven't started anywhere in your library, newest release
+  // first (by parsed year — see parseReleaseYear), falling back to Drive's
+  // add-date only for the ones with no parseable year. A single-page
+  // fetch, not full pagination — fine for a personal-scale library, and
+  // matches how Recently Added/search already work.
+  async function listUnstartedComics(limit) {
+    try {
+      const data = await driveFetch('/files', {
+        q: "mimeType != 'application/vnd.google-apps.folder' and trashed = false",
+        fields: 'files(id,name,mimeType,size,createdTime)',
+        orderBy: 'createdTime desc',
+        pageSize: '200',
+      });
+      const items = (data.files || []).filter((f) => isComicFile(f.name));
+      const progressMap = await fetchProgressMap();
+      const unstarted = items.filter((f) => {
+        const p = progressMap[f.id];
+        return !p || (!p['Last Opened'] && !p['Finished']);
+      });
+      unstarted.sort((a, b) => {
+        const yearA = parseReleaseYear(a.name);
+        const yearB = parseReleaseYear(b.name);
+        if (yearA !== null && yearB !== null) return yearB - yearA;
+        if (yearA !== null) return -1;
+        if (yearB !== null) return 1;
+        return new Date(b.createdTime) - new Date(a.createdTime);
+      });
+      return unstarted.slice(0, limit);
     } catch (e) {
       return [];
     }
@@ -1142,6 +1190,36 @@
           card.remove();
           if (!wrap.querySelector('.shelf-card')) wrap.innerHTML = '';
         });
+      });
+    } catch (e) {
+      wrap.innerHTML = '';
+    }
+  }
+
+  async function loadNextUpShelf() {
+    const wrap = $('nextup-shelf-wrap');
+    try {
+      const items = await listUnstartedComics(10);
+      if (items.length === 0) { wrap.innerHTML = ''; return; }
+      const progressMap = await fetchProgressMap();
+      let html = '<div class="shelf-title">Next up</div><div class="shelf">';
+      items.forEach((item, idx) => {
+        const cover = coverUrl(progressMap[item.id]);
+        const year = parseReleaseYear(item.name);
+        html += `
+          <div class="shelf-card" data-nextup-idx="${idx}">
+            <div class="shelf-cover">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />` : '📕'}</div>
+            <div class="shelf-card-body">
+              ${cover ? '' : `<div class="name">${escapeHtml(stripExt(item.name))}</div>`}
+              ${year ? `<div class="meta">${year}</div>` : ''}
+            </div>
+          </div>`;
+      });
+      html += '</div>';
+      wrap.innerHTML = html;
+      wrap.querySelectorAll('.shelf-card').forEach((card) => {
+        const idx = Number(card.getAttribute('data-nextup-idx'));
+        card.addEventListener('click', () => openComic(items[idx]));
       });
     } catch (e) {
       wrap.innerHTML = '';
@@ -2118,6 +2196,7 @@
   });
 
   $('btn-refresh').addEventListener('click', () => {
+    loadNextUpShelf();
     loadRecentShelf();
     loadFavoritesShelf();
     loadContinueReading();
