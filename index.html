@@ -239,7 +239,7 @@
 <!-- ================= CBZ/CBR extraction (ES module, isolated scope) ================= -->
 <script type="module">
   import { Archive } from 'https://cdn.jsdelivr.net/npm/libarchive.js@2.0.2/dist/libarchive.js';
-  Archive.init({ workerUrl: 'https://cdn.jsdelivr.net/npm/libarchive.js@2.0.2/dist/worker-bundle.js' });
+  Archive.init({ workerUrl: 'libarchive/worker-bundle.js' });
 
   const IMAGE_EXT = /\.(jpe?g|png|gif|webp|bmp|avif)$/i;
 
