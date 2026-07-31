@@ -92,10 +92,19 @@
     scrollbar-width:none;}
   .shelf::-webkit-scrollbar{display:none;}
   .shelf-card{
-    flex:0 0 auto;width:150px;background:var(--surface);border:1px solid var(--border);
+    position:relative;flex:0 0 auto;width:150px;background:var(--surface);border:1px solid var(--border);
     border-radius:var(--radius-sm);padding:12px;cursor:pointer;
   }
+  .shelf-card-dismiss{
+    position:absolute;top:6px;right:6px;width:22px;height:22px;border-radius:50%;
+    background:rgba(28,26,23,.55);color:#fff;border:none;font-size:13px;line-height:1;
+    display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:1;
+  }
+  .shelf-card-dismiss:active{background:rgba(28,26,23,.8);}
   .shelf-card .icon{font-size:22px;margin-bottom:8px;}
+  .shelf-card .icon img.cover-thumb{
+    display:block;width:100%;height:86px;object-fit:cover;border-radius:8px;
+  }
   .shelf-card .name{font-size:13px;font-weight:700;line-height:1.3;
     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
   .shelf-card .meta{font-size:11.5px;color:var(--muted);margin-top:6px;}
@@ -108,7 +117,10 @@
     border-bottom:1px solid var(--border);cursor:pointer;
   }
   .row:active{background:rgba(0,0,0,.03);}
-  .row .icon{font-size:20px;width:26px;text-align:center;flex-shrink:0;}
+  .row .icon{font-size:20px;width:32px;text-align:center;flex-shrink:0;}
+  .row .icon img.cover-thumb{
+    display:block;width:32px;height:44px;object-fit:cover;border-radius:4px;
+  }
   .row .info{flex:1;min-width:0;}
   .row .name{font-size:14.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;
     white-space:nowrap;}
@@ -495,8 +507,9 @@
         row.className = 'row';
         const isFolder = item.mimeType === 'application/vnd.google-apps.folder';
         const p = progressMap[item.id];
+        const cover = !isFolder && coverUrl(p);
         row.innerHTML = `
-          <div class="icon">${isFolder ? '📁' : '📕'}</div>
+          <div class="icon">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />` : (isFolder ? '📁' : '📕')}</div>
           <div class="info">
             <div class="name">${escapeHtml(isFolder ? item.name : stripExt(item.name))}</div>
             <div class="meta">
@@ -519,6 +532,12 @@
 
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function coverUrl(fields) {
+    const cover = fields && fields['Cover'] && fields['Cover'][0];
+    if (!cover) return null;
+    return (cover.thumbnails && cover.thumbnails.small && cover.thumbnails.small.url) || cover.url;
   }
 
   // ---------------------------------------------------------------------
@@ -544,7 +563,7 @@
       if (!resp.ok) { wrap.innerHTML = ''; return; }
       const data = await resp.json();
       let records = (data.records || [])
-        .filter(r => r.fields['Last Opened'])
+        .filter(r => r.fields['Last Opened'] && !r.fields['Dismissed'])
         .sort((a, b) => new Date(b.fields['Last Opened']) - new Date(a.fields['Last Opened']))
         .slice(0, 8);
       if (records.length === 0) { wrap.innerHTML = ''; return; }
@@ -552,9 +571,11 @@
       records.forEach(r => {
         const f = r.fields;
         const pct = f['Total Pages'] ? Math.min(100, Math.round(100 * (f['Last Page'] || 0) / f['Total Pages'])) : 0;
+        const cover = coverUrl(f);
         html += `
           <div class="shelf-card" data-drive-id="${escapeHtml(f['Drive File ID'])}">
-            <div class="icon">📕</div>
+            <button class="shelf-card-dismiss" aria-label="Remove from Continue reading">✕</button>
+            <div class="icon">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />` : '📕'}</div>
             <div class="name">${escapeHtml(f['Title'] || 'Untitled')}</div>
             <div class="meta">${f['Last Page'] || 0} / ${f['Total Pages'] || '?'}</div>
             <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
@@ -572,21 +593,78 @@
             showToast('Couldn\'t find that file anymore — it may have moved in Drive.');
           }
         });
+        card.querySelector('.shelf-card-dismiss').addEventListener('click', (e) => {
+          e.stopPropagation();
+          const id = card.getAttribute('data-drive-id');
+          saveProgress({ 'Drive File ID': id, 'Dismissed': true });
+          card.remove();
+          if (!wrap.querySelector('.shelf-card')) wrap.innerHTML = '';
+        });
       });
     } catch (e) {
       wrap.innerHTML = '';
     }
   }
 
-  function saveProgress(fields, useBeacon) {
-    const body = JSON.stringify({ fields });
-    if (useBeacon && navigator.sendBeacon) {
-      navigator.sendBeacon(WORKER_URL + '/progress', new Blob([body], { type: 'application/json' }));
-    } else {
-      fetch(WORKER_URL + '/progress', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body, keepalive: true })
-        .catch(() => {/* progress sync is best-effort */});
-    }
+  // -------------------------------------------------------------------
+  // Progress write queue — every save is persisted to localStorage before
+  // it's sent, so a dropped connection (closing the reader with no signal,
+  // a flaky network mid-session) doesn't silently lose the page you were
+  // on. Keyed by Drive File ID: only the latest write per comic matters,
+  // so a queued entry is overwritten rather than piling up. Flushed
+  // immediately on every save, and again on reconnect / app start.
+  // -------------------------------------------------------------------
+  const PROGRESS_QUEUE_KEY = 'panelsProgressQueue';
+
+  function loadProgressQueue() {
+    try { return JSON.parse(localStorage.getItem(PROGRESS_QUEUE_KEY)) || {}; }
+    catch (e) { return {}; }
   }
+
+  function saveProgressQueue(queue) {
+    localStorage.setItem(PROGRESS_QUEUE_KEY, JSON.stringify(queue));
+  }
+
+  function queuePendingProgress(fields) {
+    const queue = loadProgressQueue();
+    queue[fields['Drive File ID']] = fields;
+    saveProgressQueue(queue);
+  }
+
+  let isFlushingProgressQueue = false;
+  async function flushProgressQueue() {
+    if (isFlushingProgressQueue) return;
+    isFlushingProgressQueue = true;
+    const queue = loadProgressQueue();
+    for (const driveId of Object.keys(queue)) {
+      try {
+        const resp = await fetch(WORKER_URL + '/progress', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fields: queue[driveId] }),
+        });
+        if (resp.ok) {
+          const current = loadProgressQueue();
+          delete current[driveId];
+          saveProgressQueue(current);
+        }
+        // non-2xx response: leave it queued, try again on the next flush
+      } catch (e) {
+        break; // offline — stop this pass, remaining entries stay queued
+      }
+    }
+    isFlushingProgressQueue = false;
+  }
+
+  function saveProgress(fields) {
+    queuePendingProgress(fields); // persisted first — survives a dropped connection
+    flushProgressQueue();
+  }
+
+  window.addEventListener('online', flushProgressQueue);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') flushProgressQueue();
+  });
 
   // ---------------------------------------------------------------------
   // Reader
@@ -637,6 +715,49 @@
     } catch (e) { /* best effort */ }
   }
 
+  // -------------------------------------------------------------------
+  // Auto cover thumbnail — the first time a comic is opened, downscale
+  // its first page and upload it to Airtable's Cover attachment field,
+  // so folder/shelf listings can show a real thumbnail instead of a
+  // placeholder icon. Best-effort and non-blocking; skipped once a
+  // cover already exists for this file.
+  // -------------------------------------------------------------------
+  async function downscaleForCover(blob) {
+    const bitmap = await createImageBitmap(blob);
+    const maxEdge = 300;
+    const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
+    const w = Math.max(1, Math.round(bitmap.width * scale));
+    const h = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, w, h);
+    return await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.8));
+  }
+
+  function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function generateAndUploadCover(driveId, firstPageUrl) {
+    try {
+      const original = await fetch(firstPageUrl).then((r) => r.blob());
+      const thumb = await downscaleForCover(original);
+      if (!thumb) return;
+      const base64 = await blobToBase64(thumb);
+      await fetch(WORKER_URL + '/progress/cover', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ driveId, contentType: 'image/jpeg', file: base64, filename: 'cover.jpg' }),
+      });
+    } catch (e) { /* best effort — listing just keeps the placeholder icon */ }
+  }
+
   async function openComic(item) {
     showView('reader');
     currentComic = item;
@@ -660,7 +781,8 @@
       pages = extracted;
       setLoadProgress(100, 'Ready');
 
-      // resume from saved progress, if any
+      // resume from saved progress, if any; kick off a cover upload if
+      // this comic doesn't have one yet (best-effort, non-blocking)
       let resumeAt = 0;
       try {
         const resp = await fetch(WORKER_URL + '/progress?driveId=' + encodeURIComponent(item.id));
@@ -669,6 +791,9 @@
           const rec = (data.records || [])[0];
           if (rec && typeof rec.fields['Last Page'] === 'number') {
             resumeAt = Math.min(rec.fields['Last Page'], pages.length - 1);
+          }
+          if (!rec || !rec.fields['Cover']) {
+            generateAndUploadCover(item.id, pages[0].url);
           }
         }
       } catch (e) { /* best effort */ }
@@ -735,6 +860,7 @@
         'Last Page': pageIndex,
         'Total Pages': pages.length,
         'Last Opened': new Date().toISOString(),
+        'Dismissed': false,
       });
     }, 800);
   }
@@ -778,7 +904,8 @@
         'Last Page': pageIndex,
         'Total Pages': pages.length,
         'Last Opened': new Date().toISOString(),
-      }, true);
+        'Dismissed': false,
+      });
     }
     if (currentComic && pages.length && pageIndex === pages.length - 1) {
       clearCachedComic(currentComic.id);
@@ -871,6 +998,7 @@
   }
   window.addEventListener('load', () => {
     initGoogleAuth();
+    flushProgressQueue();
     if (hasValidToken()) {
       enterLibrary();
     } else {
