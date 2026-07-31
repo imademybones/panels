@@ -1,11 +1,14 @@
 // Panels — offline app shell
 // Same pattern as the other trackers' service workers: caches only the
 // same-origin shell (HTML/manifest/icons) so the app still opens with no
-// signal. Everything else (Google Drive, the Worker/Airtable proxy,
-// jsdelivr's archive library) always goes straight to the network and is
-// never cached — comics themselves are never stored offline in v1.
+// signal. Google Drive and the Worker/Airtable proxy always go straight to
+// the network. The comic archive itself (whichever one is currently being
+// read) is cached separately by the app's own script under
+// COMIC_CACHE_NAME — kept out of this file's cleanup below so a shell
+// update doesn't evict it mid-read.
 
 const CACHE_NAME = 'panels-shell-v1';
+const COMIC_CACHE_NAME = 'panels-comic-cache-v1';
 const SHELL_FILES = [
   './',
   './index.html',
@@ -25,7 +28,11 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((names) =>
-      Promise.all(names.filter((n) => n !== CACHE_NAME).map((n) => caches.delete(n)))
+      Promise.all(
+        names
+          .filter((n) => n !== CACHE_NAME && n !== COMIC_CACHE_NAME)
+          .map((n) => caches.delete(n))
+      )
     )
   );
   self.clients.claim();

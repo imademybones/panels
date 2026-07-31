@@ -298,6 +298,7 @@
   const GOOGLE_CLIENT_ID = '444346033962-4cui1d5l87j1sj0ntcu6ug3j5hgaa0q1.apps.googleusercontent.com';
   const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
   const WORKER_URL = 'https://comic-reader.stephen-nolan85.workers.dev';
+  const COMIC_CACHE_NAME = 'panels-comic-cache-v1';
 
   const NEEDS_SETUP = GOOGLE_CLIENT_ID.startsWith('PASTE_');
 
@@ -598,6 +599,44 @@
   let zoomed = false;
   let saveDebounce = null;
 
+  // -------------------------------------------------------------------
+  // Local comic cache — keeps the raw bytes of whichever one comic is
+  // currently being read, so reopening it (e.g. after backing out mid
+  // page) doesn't redownload from Drive. Single-slot: opening a comic
+  // evicts whatever was cached before it. Cleared once you finish
+  // (reach the last page and back out of the reader).
+  // -------------------------------------------------------------------
+  function comicCacheKey(driveId) {
+    return new Request('https://panels.local/comic-cache/' + encodeURIComponent(driveId));
+  }
+
+  async function getCachedComicBuffer(driveId) {
+    if (!('caches' in window)) return null;
+    try {
+      const cache = await caches.open(COMIC_CACHE_NAME);
+      const resp = await cache.match(comicCacheKey(driveId));
+      return resp ? await resp.arrayBuffer() : null;
+    } catch (e) { return null; }
+  }
+
+  async function cacheComicBuffer(driveId, buffer) {
+    if (!('caches' in window)) return;
+    try {
+      const cache = await caches.open(COMIC_CACHE_NAME);
+      const keys = await cache.keys();
+      await Promise.all(keys.map((k) => cache.delete(k)));
+      await cache.put(comicCacheKey(driveId), new Response(buffer));
+    } catch (e) { /* best effort — falls back to redownloading next time */ }
+  }
+
+  async function clearCachedComic(driveId) {
+    if (!('caches' in window)) return;
+    try {
+      const cache = await caches.open(COMIC_CACHE_NAME);
+      await cache.delete(comicCacheKey(driveId));
+    } catch (e) { /* best effort */ }
+  }
+
   async function openComic(item) {
     showView('reader');
     currentComic = item;
@@ -609,8 +648,14 @@
     setLoadProgress(0, 'Downloading…');
 
     try {
-      const buffer = await downloadWithProgress(item.id, item.size ? Number(item.size) : null);
-      setLoadProgress(60, 'Unpacking pages…');
+      let buffer = await getCachedComicBuffer(item.id);
+      if (buffer) {
+        setLoadProgress(60, 'Unpacking pages…');
+      } else {
+        buffer = await downloadWithProgress(item.id, item.size ? Number(item.size) : null);
+        setLoadProgress(60, 'Unpacking pages…');
+        cacheComicBuffer(item.id, buffer);
+      }
       const extracted = await window.ComicArchive.extractPages(buffer, item.name);
       pages = extracted;
       setLoadProgress(100, 'Ready');
@@ -734,6 +779,9 @@
         'Total Pages': pages.length,
         'Last Opened': new Date().toISOString(),
       }, true);
+    }
+    if (currentComic && pages.length && pageIndex === pages.length - 1) {
+      clearCachedComic(currentComic.id);
     }
     pages.forEach(p => URL.revokeObjectURL(p.url));
     pages = [];
