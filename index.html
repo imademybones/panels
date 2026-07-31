@@ -720,14 +720,14 @@
     });
     row.querySelector('.row-star').addEventListener('click', (e) => {
       e.stopPropagation();
-      if (isFolder) toggleFavoriteFolder(item, e.currentTarget, isFavorite);
-      else toggleFavoriteRow(item, e.currentTarget, isFavorite);
+      if (isFolder) toggleFavoriteFolder(item, e.currentTarget);
+      else toggleFavoriteRow(item, e.currentTarget);
     });
     row.querySelector('.row-search').addEventListener('click', (e) => e.stopPropagation());
     if (!isFolder) {
       row.querySelector('.row-read').addEventListener('click', (e) => {
         e.stopPropagation();
-        toggleReadStatus(item, e.currentTarget, isFinished);
+        toggleReadStatus(item, e.currentTarget);
       });
     }
     return row;
@@ -963,8 +963,8 @@
     }
   }
 
-  async function toggleFavoriteFolder(item, btn, currentlyFavorite) {
-    const newVal = !currentlyFavorite;
+  async function toggleFavoriteFolder(item, btn) {
+    const newVal = !btn.classList.contains('active');
     btn.classList.toggle('active', newVal);
     btn.textContent = newVal ? '★' : '☆';
     try {
@@ -1138,8 +1138,8 @@
     }
   }
 
-  function toggleFavoriteRow(item, btn, currentlyFavorite) {
-    const newVal = !currentlyFavorite;
+  function toggleFavoriteRow(item, btn) {
+    const newVal = !btn.classList.contains('active');
     btn.classList.toggle('active', newVal);
     btn.textContent = newVal ? '★' : '☆';
     saveProgress({
@@ -1156,8 +1156,8 @@
   // "Unread" reuses the existing Dismissed mechanism to drop it from
   // Continue Reading; it doesn't touch Last Page, so resuming still
   // picks up wherever you'd actually gotten to.
-  function toggleReadStatus(item, btn, currentlyFinished) {
-    const newVal = !currentlyFinished;
+  function toggleReadStatus(item, btn) {
+    const newVal = !btn.classList.contains('active');
     btn.classList.toggle('active', newVal);
     btn.textContent = newVal ? '✓' : '○';
     btn.setAttribute('aria-label', newVal ? 'Mark as unread' : 'Mark as read');
