@@ -990,8 +990,23 @@
     saveCachedComics(keep);
   }
 
-  async function cacheComicBuffer(item, buffer) {
+  // openComic() fires this without awaiting it (so caching a comic's
+  // bytes never delays showing its first page), which means opening
+  // comics back-to-back can start overlapping calls. enforceOfflineSlotCap()
+  // reads the cached-comics list, awaits a Cache Storage op, then writes
+  // the list back — two overlapping calls can interleave across that gap
+  // and one write silently loses the other's addition. Chaining every
+  // call through this single queue forces them to run strictly one at a
+  // time, closing that race without making openComic() wait on it.
+  let cacheWriteQueue = Promise.resolve();
+
+  function cacheComicBuffer(item, buffer) {
     recordCachedComicAccess(item);
+    cacheWriteQueue = cacheWriteQueue.then(() => writeComicBufferToCache(item, buffer));
+    return cacheWriteQueue;
+  }
+
+  async function writeComicBufferToCache(item, buffer) {
     if (!('caches' in window)) return;
     try {
       const cache = await caches.open(COMIC_CACHE_NAME);
@@ -1110,32 +1125,43 @@
       pages = extracted;
       setLoadProgress(100, 'Ready');
 
-      // resume from saved progress, if any; kick off a cover upload if
-      // this comic doesn't have one yet (best-effort, non-blocking). If
-      // the Worker's unreachable (no signal, or just no Drive/Worker
-      // access right now), fall back to the locally cached resume
-      // position for this same file, if there is one.
+      // resume from saved progress, if any. If the Worker's unreachable
+      // (no signal, or just no Drive/Worker access right now), fall back
+      // to the locally cached resume position for this same file.
       let resumeAt = 0;
       let reachedWorker = false;
+      let rec = null;
       try {
         const resp = await fetch(WORKER_URL + '/progress?driveId=' + encodeURIComponent(item.id));
         if (resp.ok) {
           reachedWorker = true;
           const data = await resp.json();
-          const rec = (data.records || [])[0];
+          rec = (data.records || [])[0];
           if (rec && typeof rec.fields['Last Page'] === 'number') {
             resumeAt = Math.min(rec.fields['Last Page'], pages.length - 1);
           }
-          if (!rec || !rec.fields['Cover']) {
-            (async () => {
-              const ok = await ensureProgressRow(item);
-              if (ok) generateAndUploadCover(item.id, pages[0].url);
-            })();
-          } else {
-            cacheCoverFromUrl(item.id, coverUrl(rec.fields));
-          }
         }
       } catch (e) { /* best effort */ }
+
+      // If there's no Progress row yet, create it now and wait for it —
+      // this PATCH is the only place a row ever gets created, and
+      // awaiting it here (rather than racing it against queueSave()'s
+      // 800ms debounce in a detached background task) is what actually
+      // rules out duplicate-row creation under real network latency,
+      // not just makes it unlikely.
+      if (reachedWorker && !rec) {
+        await ensureProgressRow(item);
+      }
+
+      // Cover handling stays best-effort/non-blocking — it doesn't affect
+      // row creation, so no need to await it before rendering.
+      if (reachedWorker) {
+        if (!rec || !rec.fields['Cover']) {
+          generateAndUploadCover(item.id, pages[0].url);
+        } else {
+          cacheCoverFromUrl(item.id, coverUrl(rec.fields));
+        }
+      }
 
       if (!reachedWorker) {
         const cachedMeta = findCachedComicMeta(item.id);
