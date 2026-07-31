@@ -176,6 +176,12 @@
   }
   .row-star.active{color:var(--accent);}
   .row-star:active{transform:scale(0.8);}
+  .row-search{
+    display:flex;align-items:center;justify-content:center;font-size:15px;
+    color:var(--muted);text-decoration:none;padding:6px;flex-shrink:0;
+    transition:transform .12s ease;opacity:.7;
+  }
+  .row-search:active{transform:scale(0.8);}
   .badge{
     font-size:10px;font-weight:800;letter-spacing:.03em;color:var(--accent);
     background:var(--accent-soft);padding:1px 6px;border-radius:5px;
@@ -216,6 +222,10 @@
   .reader-title{flex:1;font-size:14px;font-weight:700;overflow:hidden;text-overflow:ellipsis;
     white-space:nowrap;}
   .reader-count{font-size:13px;font-weight:600;opacity:.85;}
+  .reader-lcg-link{
+    color:#fff;text-decoration:none;font-size:15px;opacity:.75;
+    padding:4px 10px;flex-shrink:0;
+  }
   .scrubber{-webkit-appearance:none;appearance:none;width:100%;height:3px;
     background:rgba(255,255,255,.3);border-radius:2px;outline:none;}
   .scrubber::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;
@@ -276,6 +286,7 @@
 
   <main class="scroll" id="library-main">
     <div class="streak-goal-card" id="streak-goal-card"></div>
+    <div id="recent-shelf-wrap"></div>
     <div id="favorites-shelf-wrap"></div>
     <div id="continue-shelf-wrap"></div>
     <div id="folder-list"></div>
@@ -303,6 +314,7 @@
     <div class="reader-bar top" id="bar-top">
       <button class="reader-close" id="btn-close-reader">✕</button>
       <div class="reader-title" id="reader-title"></div>
+      <a class="reader-lcg-link" id="reader-lcg-link" href="#" target="_blank" rel="noopener" aria-label="Search on League of Comic Geeks">🔍</a>
       <div class="reader-count" id="reader-count"></div>
     </div>
     <div class="reader-bar bottom" id="bar-bottom">
@@ -413,6 +425,21 @@
     return /\.(cbz|cbr|zip|rar)$/i.test(name);
   }
 
+  // Scan filenames are full of release-group/scan-quality noise in
+  // parens ("... (2024) (Webrip) (The Last Kryptonian-DCP)") that makes
+  // for a bad search query — strip it down to just the title/issue.
+  function searchTitleFor(name) {
+    return stripExt(name).replace(/\([^)]*\)/g, '').replace(/\s+/g, ' ').trim();
+  }
+
+  // Verified https://leagueofcomicgeeks.com/search?keyword=X as the real
+  // search-results page (not a login-gated pull-list/collection page —
+  // this is just a manual cross-reference link, no scraping or account
+  // access involved).
+  function lcgSearchUrl(name) {
+    return 'https://leagueofcomicgeeks.com/search?keyword=' + encodeURIComponent(searchTitleFor(name));
+  }
+
   // ---------------------------------------------------------------------
   // Auth (Google Identity Services token client, session-only — same
   // pattern as the other trackers' Calendar integration)
@@ -518,6 +545,7 @@
     showView('library');
     renderBreadcrumb();
     loadReadingLogAndSettings();
+    loadRecentShelf();
     loadFavoritesShelf();
     loadContinueReading();
     loadCurrentFolder();
@@ -557,6 +585,22 @@
     return items.filter(f =>
       f.mimeType === 'application/vnd.google-apps.folder' || isComicFile(f.name)
     );
+  }
+
+  // Comic files across the whole Drive, newest-created first — the "what's
+  // new" view, since a flat folder scroll doesn't surface that on its own.
+  async function listRecentComics(limit) {
+    try {
+      const data = await driveFetch('/files', {
+        q: "mimeType != 'application/vnd.google-apps.folder' and trashed = false",
+        fields: 'files(id,name,mimeType,size,createdTime)',
+        orderBy: 'createdTime desc',
+        pageSize: '50',
+      });
+      return (data.files || []).filter((f) => isComicFile(f.name)).slice(0, limit);
+    } catch (e) {
+      return [];
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -619,7 +663,7 @@
         list.innerHTML = '<div class="empty-state">No folders or comics (.cbz/.cbr) here.</div>';
         return;
       }
-      const progressMap = await fetchProgressMap();
+      const [progressMap, favoriteFolderIds] = await Promise.all([fetchProgressMap(), fetchFavoriteFolderIds()]);
       list.innerHTML = '';
       items.forEach(item => {
         const row = document.createElement('div');
@@ -627,7 +671,7 @@
         const isFolder = item.mimeType === 'application/vnd.google-apps.folder';
         const p = progressMap[item.id];
         const cover = !isFolder && coverUrl(p);
-        const isFavorite = !!(p && p['Favorite']);
+        const isFavorite = isFolder ? favoriteFolderIds.has(item.id) : !!(p && p['Favorite']);
         row.innerHTML = `
           <div class="icon">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />` : (isFolder ? '📁' : '📕')}</div>
           <div class="info">
@@ -638,18 +682,19 @@
             </div>
             ${p && p['Total Pages'] ? `<div class="progress-track"><div class="progress-fill" style="width:${Math.min(100, Math.round(100 * (p['Last Page'] || 0) / p['Total Pages']))}%"></div></div>` : ''}
           </div>
-          ${isFolder ? '' : `<button class="row-star ${isFavorite ? 'active' : ''}" aria-label="Favorite">${isFavorite ? '★' : '☆'}</button>`}
+          <a class="row-search" href="${escapeHtml(lcgSearchUrl(item.name))}" target="_blank" rel="noopener" aria-label="Search on League of Comic Geeks">🔍</a>
+          <button class="row-star ${isFavorite ? 'active' : ''}" aria-label="Favorite">${isFavorite ? '★' : '☆'}</button>
         `;
         row.addEventListener('click', () => {
           if (isFolder) openFolder(item.id, item.name);
           else openComic(item);
         });
-        if (!isFolder) {
-          row.querySelector('.row-star').addEventListener('click', (e) => {
-            e.stopPropagation();
-            toggleFavoriteRow(item, e.currentTarget, isFavorite);
-          });
-        }
+        row.querySelector('.row-star').addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (isFolder) toggleFavoriteFolder(item, e.currentTarget, isFavorite);
+          else toggleFavoriteRow(item, e.currentTarget, isFavorite);
+        });
+        row.querySelector('.row-search').addEventListener('click', (e) => e.stopPropagation());
         list.appendChild(row);
       });
     } catch (err) {
@@ -840,6 +885,45 @@
     }
   }
 
+  async function fetchFavoriteFolderIds() {
+    try {
+      const resp = await fetch(WORKER_URL + '/favoritefolders');
+      if (!resp.ok) return new Set();
+      const data = await resp.json();
+      return new Set((data.records || []).map((r) => r.fields['Drive Folder ID']));
+    } catch (e) {
+      return new Set();
+    }
+  }
+
+  async function toggleFavoriteFolder(item, btn, currentlyFavorite) {
+    const newVal = !currentlyFavorite;
+    btn.classList.toggle('active', newVal);
+    btn.textContent = newVal ? '★' : '☆';
+    try {
+      if (newVal) {
+        await fetch(WORKER_URL + '/favoritefolders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fields: { 'Drive Folder ID': item.id, 'Name': item.name } }),
+        });
+      } else {
+        await fetch(WORKER_URL + '/favoritefolders?driveFolderId=' + encodeURIComponent(item.id), { method: 'DELETE' });
+      }
+    } catch (e) { /* best effort — folder favorites aren't queued/retried like progress is */ }
+    loadFavoritesShelf();
+  }
+
+  // Navigates into a favorited folder without assuming it's a child of
+  // wherever you're currently browsing — resets the breadcrumb to a fresh
+  // "My Drive > [Folder]" trail rather than inheriting an unrelated path.
+  function openFavoriteFolder(id, name) {
+    crumbs = [{ id: 'root', name: 'My Drive' }, { id, name }];
+    saveCrumbs();
+    renderBreadcrumb();
+    loadCurrentFolder();
+  }
+
   async function loadContinueReading() {
     const wrap = $('continue-shelf-wrap');
     try {
@@ -892,34 +976,76 @@
     }
   }
 
-  async function loadFavoritesShelf() {
-    const wrap = $('favorites-shelf-wrap');
+  async function loadRecentShelf() {
+    const wrap = $('recent-shelf-wrap');
     try {
-      const resp = await fetch(WORKER_URL + '/progress');
-      if (!resp.ok) { wrap.innerHTML = ''; return; }
-      const data = await resp.json();
-      const records = (data.records || [])
-        .filter((r) => r.fields['Favorite'])
-        .sort((a, b) => (a.fields['Title'] || '').localeCompare(b.fields['Title'] || '', undefined, { sensitivity: 'base' }));
-      if (records.length === 0) { wrap.innerHTML = ''; return; }
-      let html = '<div class="shelf-title">Favorites</div><div class="shelf">';
-      records.forEach((r) => {
-        const f = r.fields;
-        const cover = coverUrl(f);
+      const items = await listRecentComics(10);
+      if (items.length === 0) { wrap.innerHTML = ''; return; }
+      const progressMap = await fetchProgressMap();
+      let html = '<div class="shelf-title">Recently added</div><div class="shelf">';
+      items.forEach((item, idx) => {
+        const cover = coverUrl(progressMap[item.id]);
         html += `
-          <div class="shelf-card" data-drive-id="${escapeHtml(f['Drive File ID'])}">
-            <button class="shelf-card-dismiss" aria-label="Remove from Favorites">★</button>
+          <div class="shelf-card" data-recent-idx="${idx}">
             <div class="shelf-cover">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />` : '📕'}</div>
             <div class="shelf-card-body">
-              ${cover ? '' : `<div class="name">${escapeHtml(f['Title'] || 'Untitled')}</div>`}
+              ${cover ? '' : `<div class="name">${escapeHtml(stripExt(item.name))}</div>`}
             </div>
           </div>`;
       });
       html += '</div>';
       wrap.innerHTML = html;
       wrap.querySelectorAll('.shelf-card').forEach((card) => {
+        const idx = Number(card.getAttribute('data-recent-idx'));
+        card.addEventListener('click', () => openComic(items[idx]));
+      });
+    } catch (e) {
+      wrap.innerHTML = '';
+    }
+  }
+
+  async function loadFavoritesShelf() {
+    const wrap = $('favorites-shelf-wrap');
+    try {
+      const [progressResp, foldersResp] = await Promise.all([
+        fetch(WORKER_URL + '/progress'),
+        fetch(WORKER_URL + '/favoritefolders'),
+      ]);
+      const comics = progressResp.ok
+        ? (await progressResp.json()).records
+          .filter((r) => r.fields['Favorite'])
+          .map((r) => ({ type: 'comic', id: r.fields['Drive File ID'], name: r.fields['Title'] || 'Untitled', cover: coverUrl(r.fields) }))
+        : [];
+      const folders = foldersResp.ok
+        ? (await foldersResp.json()).records
+          .map((r) => ({ type: 'folder', id: r.fields['Drive Folder ID'], name: r.fields['Name'] || 'Untitled', cover: null }))
+        : [];
+      const items = comics.concat(folders)
+        .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+      if (items.length === 0) { wrap.innerHTML = ''; return; }
+
+      let html = '<div class="shelf-title">Favorites</div><div class="shelf">';
+      items.forEach((it) => {
+        html += `
+          <div class="shelf-card" data-drive-id="${escapeHtml(it.id)}" data-type="${it.type}">
+            <button class="shelf-card-dismiss" aria-label="Remove from Favorites">★</button>
+            <div class="shelf-cover">${it.cover ? `<img class="cover-thumb" src="${escapeHtml(it.cover)}" alt="" />` : (it.type === 'folder' ? '📁' : '📕')}</div>
+            <div class="shelf-card-body">
+              ${it.cover ? '' : `<div class="name">${escapeHtml(it.name)}</div>`}
+            </div>
+          </div>`;
+      });
+      html += '</div>';
+      wrap.innerHTML = html;
+      wrap.querySelectorAll('.shelf-card').forEach((card) => {
+        const id = card.getAttribute('data-drive-id');
+        const type = card.getAttribute('data-type');
         card.addEventListener('click', async () => {
-          const id = card.getAttribute('data-drive-id');
+          if (type === 'folder') {
+            const item = items.find((it) => it.type === 'folder' && it.id === id);
+            openFavoriteFolder(id, item ? item.name : 'Folder');
+            return;
+          }
           try {
             const meta = await driveFetch('/files/' + id, { fields: 'id,name,mimeType,size' });
             openComic(meta);
@@ -929,8 +1055,11 @@
         });
         card.querySelector('.shelf-card-dismiss').addEventListener('click', (e) => {
           e.stopPropagation();
-          const id = card.getAttribute('data-drive-id');
-          saveProgress({ 'Drive File ID': id, 'Favorite': false });
+          if (type === 'folder') {
+            fetch(WORKER_URL + '/favoritefolders?driveFolderId=' + encodeURIComponent(id), { method: 'DELETE' }).catch(() => {});
+          } else {
+            saveProgress({ 'Drive File ID': id, 'Favorite': false });
+          }
           card.remove();
           if (!wrap.querySelector('.shelf-card')) wrap.innerHTML = '';
         });
@@ -1342,6 +1471,7 @@
       updateCachedComicProgress(item.id, resumeAt, pages.length);
       $('scrubber').max = String(pages.length - 1);
       $('reader-title').textContent = stripExt(item.name);
+      $('reader-lcg-link').href = lcgSearchUrl(item.name);
       renderPage();
       showBars(true);
       $('load-overlay').classList.add('hidden');
@@ -1385,6 +1515,7 @@
       recordCachedComicAccess({ id: meta.id, name: meta.name });
       $('scrubber').max = String(pages.length - 1);
       $('reader-title').textContent = stripExt(meta.name);
+      $('reader-lcg-link').href = lcgSearchUrl(meta.name);
       renderPage();
       showBars(true);
       $('load-overlay').classList.add('hidden');
@@ -1592,6 +1723,7 @@
   });
 
   $('btn-refresh').addEventListener('click', () => {
+    loadRecentShelf();
     loadFavoritesShelf();
     loadContinueReading();
     loadCurrentFolder();
