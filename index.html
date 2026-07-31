@@ -105,6 +105,14 @@
   .breadcrumb .sep{color:var(--border);}
 
   .refresh-row{padding:0 18px 4px;flex-shrink:0;}
+  .search-row{padding:0 18px 10px;flex-shrink:0;}
+  .search-input{
+    width:100%;background:var(--surface);border:1px solid var(--border);
+    border-radius:999px;padding:10px 16px;font-size:14px;color:var(--ink);
+    font-family:inherit;-webkit-appearance:none;appearance:none;
+  }
+  .search-input::placeholder{color:var(--muted);}
+  .search-input:focus{outline:none;border-color:var(--accent);}
 
   main.scroll{flex:1;overflow-y:auto;padding:4px 18px 40px;}
 
@@ -280,6 +288,9 @@
   </header>
 
   <div class="breadcrumb" id="breadcrumb"></div>
+  <div class="search-row">
+    <input type="search" class="search-input" id="search-input" placeholder="Search your library…" />
+  </div>
   <div class="refresh-row">
     <button class="link-btn" id="btn-refresh">↻ Refresh</button>
   </div>
@@ -603,6 +614,22 @@
     }
   }
 
+  // Name search across the whole Drive (not scoped to any one folder) —
+  // same folder-or-comic filter as listFolder(), so a matching series
+  // folder surfaces alongside matching issues.
+  async function searchComics(query) {
+    const safeQuery = query.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const data = await driveFetch('/files', {
+      q: `trashed = false and name contains '${safeQuery}'`,
+      fields: 'files(id,name,mimeType,size,createdTime)',
+      orderBy: 'folder,name',
+      pageSize: '100',
+    });
+    return (data.files || []).filter((f) =>
+      f.mimeType === 'application/vnd.google-apps.folder' || isComicFile(f.name)
+    );
+  }
+
   // ---------------------------------------------------------------------
   // Breadcrumb / folder navigation (persisted so relaunching returns to
   // wherever you last were)
@@ -653,7 +680,47 @@
     loadCurrentFolder();
   }
 
+  // Builds one folder/comic row — shared by normal folder browsing and
+  // search results, so both get identical cover art, favorite star,
+  // LCG link, and progress display. openFolderFn lets the caller decide
+  // how a folder tap should navigate: pushing onto the current
+  // breadcrumb (normal browsing) vs. resetting it (search results,
+  // whose true ancestry isn't known).
+  function buildItemRow(item, progressMap, favoriteFolderIds, openFolderFn) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    const isFolder = item.mimeType === 'application/vnd.google-apps.folder';
+    const p = progressMap[item.id];
+    const cover = !isFolder && coverUrl(p);
+    const isFavorite = isFolder ? favoriteFolderIds.has(item.id) : !!(p && p['Favorite']);
+    row.innerHTML = `
+      <div class="icon">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />` : (isFolder ? '📁' : '📕')}</div>
+      <div class="info">
+        <div class="name">${escapeHtml(isFolder ? item.name : stripExt(item.name))}</div>
+        <div class="meta">
+          ${isFolder ? '' : `<span class="badge">${formatOf(item.name)}</span>`}
+          ${p ? `<span>${p['Last Page'] || 0} / ${p['Total Pages'] || '?'} pages</span>` : ''}
+        </div>
+        ${p && p['Total Pages'] ? `<div class="progress-track"><div class="progress-fill" style="width:${Math.min(100, Math.round(100 * (p['Last Page'] || 0) / p['Total Pages']))}%"></div></div>` : ''}
+      </div>
+      <a class="row-search" href="${escapeHtml(lcgSearchUrl(item.name))}" target="_blank" rel="noopener" aria-label="Search on League of Comic Geeks">🔍</a>
+      <button class="row-star ${isFavorite ? 'active' : ''}" aria-label="Favorite">${isFavorite ? '★' : '☆'}</button>
+    `;
+    row.addEventListener('click', () => {
+      if (isFolder) openFolderFn(item.id, item.name);
+      else openComic(item);
+    });
+    row.querySelector('.row-star').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (isFolder) toggleFavoriteFolder(item, e.currentTarget, isFavorite);
+      else toggleFavoriteRow(item, e.currentTarget, isFavorite);
+    });
+    row.querySelector('.row-search').addEventListener('click', (e) => e.stopPropagation());
+    return row;
+  }
+
   async function loadCurrentFolder() {
+    $('search-input').value = '';
     const list = $('folder-list');
     list.innerHTML = '<div class="loading-state">Loading…</div>';
     const current = crumbs[crumbs.length - 1];
@@ -665,38 +732,24 @@
       }
       const [progressMap, favoriteFolderIds] = await Promise.all([fetchProgressMap(), fetchFavoriteFolderIds()]);
       list.innerHTML = '';
-      items.forEach(item => {
-        const row = document.createElement('div');
-        row.className = 'row';
-        const isFolder = item.mimeType === 'application/vnd.google-apps.folder';
-        const p = progressMap[item.id];
-        const cover = !isFolder && coverUrl(p);
-        const isFavorite = isFolder ? favoriteFolderIds.has(item.id) : !!(p && p['Favorite']);
-        row.innerHTML = `
-          <div class="icon">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />` : (isFolder ? '📁' : '📕')}</div>
-          <div class="info">
-            <div class="name">${escapeHtml(isFolder ? item.name : stripExt(item.name))}</div>
-            <div class="meta">
-              ${isFolder ? '' : `<span class="badge">${formatOf(item.name)}</span>`}
-              ${p ? `<span>${p['Last Page'] || 0} / ${p['Total Pages'] || '?'} pages</span>` : ''}
-            </div>
-            ${p && p['Total Pages'] ? `<div class="progress-track"><div class="progress-fill" style="width:${Math.min(100, Math.round(100 * (p['Last Page'] || 0) / p['Total Pages']))}%"></div></div>` : ''}
-          </div>
-          <a class="row-search" href="${escapeHtml(lcgSearchUrl(item.name))}" target="_blank" rel="noopener" aria-label="Search on League of Comic Geeks">🔍</a>
-          <button class="row-star ${isFavorite ? 'active' : ''}" aria-label="Favorite">${isFavorite ? '★' : '☆'}</button>
-        `;
-        row.addEventListener('click', () => {
-          if (isFolder) openFolder(item.id, item.name);
-          else openComic(item);
-        });
-        row.querySelector('.row-star').addEventListener('click', (e) => {
-          e.stopPropagation();
-          if (isFolder) toggleFavoriteFolder(item, e.currentTarget, isFavorite);
-          else toggleFavoriteRow(item, e.currentTarget, isFavorite);
-        });
-        row.querySelector('.row-search').addEventListener('click', (e) => e.stopPropagation());
-        list.appendChild(row);
-      });
+      items.forEach(item => list.appendChild(buildItemRow(item, progressMap, favoriteFolderIds, openFolder)));
+    } catch (err) {
+      list.innerHTML = '<div class="empty-state">' + escapeHtml(err.message || 'Something went wrong.') + '</div>';
+    }
+  }
+
+  async function runSearch(query) {
+    const list = $('folder-list');
+    list.innerHTML = '<div class="loading-state">Searching…</div>';
+    try {
+      const items = await searchComics(query);
+      if (items.length === 0) {
+        list.innerHTML = '<div class="empty-state">No matches for "' + escapeHtml(query) + '".</div>';
+        return;
+      }
+      const [progressMap, favoriteFolderIds] = await Promise.all([fetchProgressMap(), fetchFavoriteFolderIds()]);
+      list.innerHTML = '';
+      items.forEach(item => list.appendChild(buildItemRow(item, progressMap, favoriteFolderIds, openFolderDirect)));
     } catch (err) {
       list.innerHTML = '<div class="empty-state">' + escapeHtml(err.message || 'Something went wrong.') + '</div>';
     }
@@ -914,10 +967,12 @@
     loadFavoritesShelf();
   }
 
-  // Navigates into a favorited folder without assuming it's a child of
-  // wherever you're currently browsing — resets the breadcrumb to a fresh
+  // Navigates into a folder without assuming it's a child of wherever
+  // you're currently browsing — resets the breadcrumb to a fresh
   // "My Drive > [Folder]" trail rather than inheriting an unrelated path.
-  function openFavoriteFolder(id, name) {
+  // Used for favorited-folder and search-result taps, whose true
+  // ancestry in the Drive tree isn't known.
+  function openFolderDirect(id, name) {
     crumbs = [{ id: 'root', name: 'My Drive' }, { id, name }];
     saveCrumbs();
     renderBreadcrumb();
@@ -1043,7 +1098,7 @@
         card.addEventListener('click', async () => {
           if (type === 'folder') {
             const item = items.find((it) => it.type === 'folder' && it.id === id);
-            openFavoriteFolder(id, item ? item.name : 'Folder');
+            openFolderDirect(id, item ? item.name : 'Folder');
             return;
           }
           try {
@@ -1727,6 +1782,14 @@
     loadFavoritesShelf();
     loadContinueReading();
     loadCurrentFolder();
+  });
+
+  let searchDebounce = null;
+  $('search-input').addEventListener('input', (e) => {
+    clearTimeout(searchDebounce);
+    const q = e.target.value.trim();
+    if (q.length === 0) { loadCurrentFolder(); return; }
+    searchDebounce = setTimeout(() => runSearch(q), 300);
   });
 
   $('btn-stats').addEventListener('click', () => showView('stats'));
