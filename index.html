@@ -93,7 +93,7 @@
   .shelf::-webkit-scrollbar{display:none;}
   .shelf-card{
     position:relative;flex:0 0 auto;width:150px;background:var(--surface);border:1px solid var(--border);
-    border-radius:var(--radius-sm);padding:12px;cursor:pointer;
+    border-radius:var(--radius-sm);padding:0;cursor:pointer;overflow:hidden;
   }
   .shelf-card-dismiss{
     position:absolute;top:6px;right:6px;width:22px;height:22px;border-radius:50%;
@@ -101,10 +101,12 @@
     display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:1;
   }
   .shelf-card-dismiss:active{background:rgba(28,26,23,.8);}
-  .shelf-card .icon{font-size:22px;margin-bottom:8px;}
-  .shelf-card .icon img.cover-thumb{
-    display:block;width:100%;height:86px;object-fit:cover;border-radius:8px;
+  .shelf-cover{
+    width:100%;aspect-ratio:2/3;background:var(--accent-soft);
+    display:flex;align-items:center;justify-content:center;font-size:28px;
   }
+  .shelf-cover img.cover-thumb{display:block;width:100%;height:100%;object-fit:cover;}
+  .shelf-card-body{padding:10px 12px 12px;}
   .shelf-card .name{font-size:13px;font-weight:700;line-height:1.3;
     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
   .shelf-card .meta{font-size:11.5px;color:var(--muted);margin-top:6px;}
@@ -537,7 +539,7 @@
   function coverUrl(fields) {
     const cover = fields && fields['Cover'] && fields['Cover'][0];
     if (!cover) return null;
-    return (cover.thumbnails && cover.thumbnails.small && cover.thumbnails.small.url) || cover.url;
+    return (cover.thumbnails && cover.thumbnails.large && cover.thumbnails.large.url) || cover.url;
   }
 
   // ---------------------------------------------------------------------
@@ -575,10 +577,12 @@
         html += `
           <div class="shelf-card" data-drive-id="${escapeHtml(f['Drive File ID'])}">
             <button class="shelf-card-dismiss" aria-label="Remove from Continue reading">✕</button>
-            <div class="icon">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />` : '📕'}</div>
-            <div class="name">${escapeHtml(f['Title'] || 'Untitled')}</div>
-            <div class="meta">${f['Last Page'] || 0} / ${f['Total Pages'] || '?'}</div>
-            <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
+            <div class="shelf-cover">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />` : '📕'}</div>
+            <div class="shelf-card-body">
+              ${cover ? '' : `<div class="name">${escapeHtml(f['Title'] || 'Untitled')}</div>`}
+              <div class="meta">${f['Last Page'] || 0} / ${f['Total Pages'] || '?'}</div>
+              <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
+            </div>
           </div>`;
       });
       html += '</div>';
@@ -724,7 +728,7 @@
   // -------------------------------------------------------------------
   async function downscaleForCover(blob) {
     const bitmap = await createImageBitmap(blob);
-    const maxEdge = 300;
+    const maxEdge = 640;
     const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
     const w = Math.max(1, Math.round(bitmap.width * scale));
     const h = Math.max(1, Math.round(bitmap.height * scale));
@@ -732,7 +736,7 @@
     canvas.width = w;
     canvas.height = h;
     canvas.getContext('2d').drawImage(bitmap, 0, 0, w, h);
-    return await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.8));
+    return await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
   }
 
   function blobToBase64(blob) {
@@ -742,6 +746,27 @@
       reader.onerror = reject;
       reader.readAsDataURL(blob);
     });
+  }
+
+  // Creates (or leaves untouched) the Progress row for this file through
+  // the same upsert-by-Drive-File-ID route every other write uses — the
+  // only code path in the whole app allowed to create a row. Awaited
+  // before a cover upload is attempted, so the cover route (which only
+  // ever looks a row up, never creates one) reliably finds it instead of
+  // two independent paths racing to create duplicate rows.
+  async function ensureProgressRow(item) {
+    try {
+      const resp = await fetch(WORKER_URL + '/progress', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields: {
+          'Drive File ID': item.id,
+          'Title': stripExt(item.name),
+          'Format': formatOf(item.name),
+        } }),
+      });
+      return resp.ok;
+    } catch (e) { return false; }
   }
 
   async function generateAndUploadCover(driveId, firstPageUrl) {
@@ -793,7 +818,10 @@
             resumeAt = Math.min(rec.fields['Last Page'], pages.length - 1);
           }
           if (!rec || !rec.fields['Cover']) {
-            generateAndUploadCover(item.id, pages[0].url);
+            (async () => {
+              const ok = await ensureProgressRow(item);
+              if (ok) generateAndUploadCover(item.id, pages[0].url);
+            })();
           }
         }
       } catch (e) { /* best effort */ }
