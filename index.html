@@ -134,6 +134,10 @@
   /* Continue reading shelf */
   .shelf-title{font-size:12.5px;font-weight:700;text-transform:uppercase;
     letter-spacing:.06em;color:var(--muted);margin:14px 0 8px;}
+  .cv-credit{
+    text-transform:none;letter-spacing:normal;font-weight:600;font-size:11px;
+    color:var(--muted);opacity:.65;text-decoration:none;margin-left:6px;
+  }
   .shelf{display:flex;gap:10px;overflow-x:auto;padding-bottom:6px;margin-bottom:8px;
     scrollbar-width:none;}
   .shelf::-webkit-scrollbar{display:none;}
@@ -524,6 +528,19 @@
     return 'https://leagueofcomicgeeks.com/search?keyword=' + encodeURIComponent(searchTitleFor(name));
   }
 
+  // Splits the cleaned title from a trailing issue number, e.g.
+  // "Absolute Batman 001" -> { title: "Absolute Batman", issue: 1 }.
+  // Collections/TPBs/annuals with no trailing number get issue: null —
+  // ComicVine lookup skips narrowing to a specific issue in that case.
+  function parseTitleAndIssue(name) {
+    const cleaned = searchTitleFor(name);
+    const match = cleaned.match(/^(.*?)\s+0*(\d+)$/);
+    if (match && match[1].trim()) {
+      return { title: match[1].trim(), issue: parseInt(match[2], 10) };
+    }
+    return { title: cleaned, issue: null };
+  }
+
   // ---------------------------------------------------------------------
   // Auth (Google Identity Services token client, session-only — same
   // pattern as the other trackers' Calendar integration)
@@ -708,6 +725,64 @@
   // add-date only for the ones with no parseable year. A single-page
   // fetch, not full pagination — fine for a personal-scale library, and
   // matches how Recently Added/search already work.
+  // Three-tier "newness" sort key: a real ComicVine release date beats a
+  // filename-parsed year beats Drive's own add-date. Lower tier number
+  // wins; within a tier, higher value (a later timestamp/year) wins.
+  function nextUpSortKey(item, progressMap) {
+    const p = progressMap[item.id];
+    const releaseDate = p && p['Release Date'];
+    if (releaseDate) {
+      const t = new Date(releaseDate + 'T00:00:00').getTime();
+      if (!isNaN(t)) return { tier: 0, value: t };
+    }
+    const year = parseReleaseYear(item.name);
+    if (year !== null) return { tier: 1, value: year };
+    return { tier: 2, value: new Date(item.createdTime).getTime() };
+  }
+
+  function compareNextUp(a, b, progressMap) {
+    const ka = nextUpSortKey(a, progressMap);
+    const kb = nextUpSortKey(b, progressMap);
+    if (ka.tier !== kb.tier) return ka.tier - kb.tier;
+    return kb.value - ka.value;
+  }
+
+  // Asks the Worker to resolve item's real release date from ComicVine and
+  // caches it to Progress['Release Date'] (and the in-memory progressMap,
+  // so the current render reflects it immediately without waiting on the
+  // write to land). Best-effort — a miss just leaves the filename-year
+  // fallback in place.
+  async function resolveComicVineDate(item, progressMap) {
+    const { title, issue } = parseTitleAndIssue(item.name);
+    const year = parseReleaseYear(item.name);
+    try {
+      const params = new URLSearchParams({ title });
+      if (issue !== null) params.set('issue', String(issue));
+      if (year !== null) params.set('year', String(year));
+      const resp = await fetch(WORKER_URL + '/comicvine/lookup?' + params.toString());
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (!data.releaseDate) return;
+      saveProgress({
+        'Drive File ID': item.id,
+        'Title': stripExt(item.name),
+        'Format': formatOf(item.name),
+        'Release Date': data.releaseDate,
+      });
+      progressMap[item.id] = { ...(progressMap[item.id] || {}), 'Release Date': data.releaseDate };
+    } catch (e) { /* best effort — filename-year sort still applies */ }
+  }
+
+  // Comics you haven't started anywhere in your library, newest first.
+  // Sorts by whatever's already known (cached ComicVine date > filename
+  // year > Drive add-date), then resolves ComicVine dates for a small
+  // batch of the top-ranked candidates that don't have one cached yet —
+  // ComicVine's free tier is rate-limited (200 req/hr/resource, and each
+  // resolution costs 2 calls), so this only ever spends that budget on
+  // comics likely to actually matter, a few at a time across loads,
+  // rather than trying to resolve the whole library at once.
+  const COMICVINE_RESOLVE_BATCH = 8;
+
   async function listUnstartedComics(limit) {
     try {
       const data = await driveFetch('/files', {
@@ -722,23 +797,22 @@
         const p = progressMap[f.id];
         return !p || (!p['Last Opened'] && !p['Finished']);
       });
-      unstarted.sort((a, b) => {
-        const yearA = parseReleaseYear(a.name);
-        const yearB = parseReleaseYear(b.name);
-        if (yearA !== null && yearB !== null && yearA !== yearB) return yearB - yearA;
-        if (yearA !== null && yearB === null) return -1;
-        if (yearA === null && yearB !== null) return 1;
-        // Equal years (including both the same year) or both unparseable —
-        // fall back to Drive's add-date so ties still land in a real,
-        // consistent order instead of whatever the raw query happened to
-        // return. Filenames only carry a year, not month/day, so this is
-        // as fine-grained as it gets without pulling real release dates
-        // from an external source.
-        return new Date(b.createdTime) - new Date(a.createdTime);
-      });
-      return unstarted.slice(0, limit);
+
+      unstarted.sort((a, b) => compareNextUp(a, b, progressMap));
+
+      const poolSize = Math.max(limit * 2, 20);
+      const pool = unstarted.slice(0, poolSize);
+      const needsResolution = pool
+        .filter((f) => !(progressMap[f.id] && progressMap[f.id]['Release Date']))
+        .slice(0, COMICVINE_RESOLVE_BATCH);
+      if (needsResolution.length > 0) {
+        await Promise.all(needsResolution.map((f) => resolveComicVineDate(f, progressMap)));
+        pool.sort((a, b) => compareNextUp(a, b, progressMap));
+      }
+
+      return { items: pool.slice(0, limit), progressMap };
     } catch (e) {
-      return [];
+      return { items: [], progressMap: {} };
     }
   }
 
@@ -1202,22 +1276,39 @@
     }
   }
 
+  // Formats a Next Up badge: "Mar 2024" for a real ComicVine date (visibly
+  // more precise), a bare "2024" for a filename-parsed year, or nothing
+  // when neither resolved.
+  function formatNextUpBadge(item, progressMap) {
+    const p = progressMap[item.id];
+    const releaseDate = p && p['Release Date'];
+    if (releaseDate) {
+      const d = new Date(releaseDate + 'T00:00:00');
+      if (!isNaN(d)) return d.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+    }
+    const year = parseReleaseYear(item.name);
+    return year ? String(year) : null;
+  }
+
   async function loadNextUpShelf() {
     const wrap = $('nextup-shelf-wrap');
     try {
-      const items = await listUnstartedComics(10);
+      const { items, progressMap } = await listUnstartedComics(10);
       if (items.length === 0) { wrap.innerHTML = ''; return; }
-      const progressMap = await fetchProgressMap();
-      let html = '<div class="shelf-title">Next up</div><div class="shelf">';
+      let html = `
+        <div class="shelf-title">Next up
+          <a href="https://comicvine.gamespot.com" target="_blank" rel="noopener" class="cv-credit">via Comic Vine</a>
+        </div>
+        <div class="shelf">`;
       items.forEach((item, idx) => {
         const cover = coverUrl(progressMap[item.id]);
-        const year = parseReleaseYear(item.name);
+        const badge = formatNextUpBadge(item, progressMap);
         html += `
           <div class="shelf-card" data-nextup-idx="${idx}">
             <div class="shelf-cover">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />` : '📕'}</div>
             <div class="shelf-card-body">
               ${cover ? '' : `<div class="name">${escapeHtml(stripExt(item.name))}</div>`}
-              ${year ? `<div class="meta">${year}</div>` : ''}
+              ${badge ? `<div class="meta">${escapeHtml(badge)}</div>` : ''}
             </div>
           </div>`;
       });
