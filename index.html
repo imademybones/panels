@@ -725,9 +725,15 @@
       unstarted.sort((a, b) => {
         const yearA = parseReleaseYear(a.name);
         const yearB = parseReleaseYear(b.name);
-        if (yearA !== null && yearB !== null) return yearB - yearA;
-        if (yearA !== null) return -1;
-        if (yearB !== null) return 1;
+        if (yearA !== null && yearB !== null && yearA !== yearB) return yearB - yearA;
+        if (yearA !== null && yearB === null) return -1;
+        if (yearA === null && yearB !== null) return 1;
+        // Equal years (including both the same year) or both unparseable —
+        // fall back to Drive's add-date so ties still land in a real,
+        // consistent order instead of whatever the raw query happened to
+        // return. Filenames only carry a year, not month/day, so this is
+        // as fine-grained as it gets without pulling real release dates
+        // from an external source.
         return new Date(b.createdTime) - new Date(a.createdTime);
       });
       return unstarted.slice(0, limit);
