@@ -58,14 +58,14 @@
   }
   .setup-note code{background:rgba(0,0,0,.06);padding:1px 5px;border-radius:4px;}
   .offline-continue{
-    margin:0 0 24px;padding:16px;background:var(--surface);border:1px solid var(--border);
+    margin:0 0 24px;padding:16px 0 10px;background:var(--surface);border:1px solid var(--border);
     border-radius:var(--radius);text-align:left;
   }
   .offline-continue-label{
     font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;
-    color:var(--muted);margin-bottom:10px;
+    color:var(--muted);margin:0 16px 10px;
   }
-  .offline-continue .btn-outline{width:100%;padding:12px 18px;font-size:14px;}
+  .offline-continue .shelf{margin:0;padding:0 16px 6px;}
 
   /* ---------- Library shell ---------- */
   #view-library{height:100%;display:flex;flex-direction:column;}
@@ -223,7 +223,7 @@
     <p class="wordmark">Panels<span>.</span></p>
     <div class="offline-continue" id="offline-continue" style="display:none;">
       <div class="offline-continue-label">Continue reading offline</div>
-      <button class="btn btn-outline" id="btn-continue-offline"></button>
+      <div class="shelf" id="offline-continue-shelf"></div>
     </div>
     <p class="connect-sub">Your comics, straight from Google Drive. No library to maintain — just connect and start reading.</p>
     <button class="btn" id="btn-connect">Connect Google Drive</button>
@@ -342,6 +342,8 @@
   const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
   const WORKER_URL = 'https://comic-reader.stephen-nolan85.workers.dev';
   const COMIC_CACHE_NAME = 'panels-comic-cache-v1';
+  const COVER_CACHE_NAME = 'panels-cover-cache-v1';
+  const MAX_OFFLINE_SLOTS = 3;
 
   const NEEDS_SETUP = GOOGLE_CLIENT_ID.startsWith('PASTE_');
 
@@ -419,18 +421,44 @@
     showView('connect');
   }
 
-  // Shows or hides the "Continue reading offline" card on the connect
-  // screen, depending on whether the cached comic's bytes are actually
-  // still present (not just its metadata — Cache Storage can in principle
-  // get evicted under storage pressure).
+  // Shows or hides the "Continue reading offline" shelf on the connect
+  // screen, depending on which cached comics' bytes are actually still
+  // present (not just their metadata — Cache Storage can in principle get
+  // evicted under storage pressure). Styled the same as the Continue
+  // Reading shelf, including real cover art from the local cover cache.
   async function renderOfflineConnectOption() {
     const wrap = $('offline-continue');
-    const meta = loadCachedComicMeta();
-    if (!meta || !(await hasCachedComic(meta.id))) {
+    const shelfEl = $('offline-continue-shelf');
+    const list = loadCachedComics();
+    const present = [];
+    for (const meta of list) {
+      if (await hasCachedComic(meta.id)) present.push(meta);
+    }
+    if (present.length === 0) {
       wrap.style.display = 'none';
+      shelfEl.innerHTML = '';
       return;
     }
-    $('btn-continue-offline').textContent = '📖 ' + stripExt(meta.name);
+    present.sort((a, b) => b.lastAccessedAt - a.lastAccessedAt);
+
+    let html = '';
+    for (const meta of present) {
+      const cover = await getLocalCoverUrl(meta.id);
+      const pct = meta.totalPages ? Math.min(100, Math.round(100 * (meta.lastPage || 0) / meta.totalPages)) : 0;
+      html += `
+        <div class="shelf-card" data-drive-id="${escapeHtml(meta.id)}">
+          <div class="shelf-cover">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />` : '📕'}</div>
+          <div class="shelf-card-body">
+            ${cover ? '' : `<div class="name">${escapeHtml(stripExt(meta.name))}</div>`}
+            <div class="meta">${meta.lastPage || 0} / ${meta.totalPages || '?'}</div>
+            <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
+          </div>
+        </div>`;
+    }
+    shelfEl.innerHTML = html;
+    shelfEl.querySelectorAll('.shelf-card').forEach((card) => {
+      card.addEventListener('click', () => openCachedComicOffline(card.getAttribute('data-drive-id')));
+    });
     wrap.style.display = 'block';
   }
 
@@ -830,47 +858,74 @@
   let saveDebounce = null;
 
   // -------------------------------------------------------------------
-  // Local comic cache — keeps the raw bytes of whichever one comic is
-  // currently being read, so reopening it (e.g. after backing out mid
-  // page) doesn't redownload from Drive. Single-slot: opening a comic
-  // evicts whatever was cached before it. Cleared once you finish
-  // (reach the last page and back out of the reader).
+  // Local comic cache — keeps the raw bytes of up to MAX_OFFLINE_SLOTS
+  // recently-read comics, so reopening one (e.g. after backing out mid
+  // page) doesn't redownload from Drive. Opening a comic beyond the cap
+  // evicts the least-recently-accessed one. A comic's slot is freed once
+  // you finish it (reach the last page and back out of the reader).
   //
-  // A small localStorage record (id, name, lastPage, totalPages) is kept
-  // in lockstep with the cached bytes, so the app knows what's available
-  // offline — and its resume position — without any network call. This
-  // is what powers "Continue reading offline" on the connect screen when
-  // there's no Drive token (expired, or genuinely no connectivity to
-  // reach Google at all).
+  // A small localStorage list (id, name, lastPage, totalPages,
+  // lastAccessedAt) is kept in lockstep with the cached bytes, so the app
+  // knows what's available offline — and each one's resume position —
+  // without any network call. This is what powers "Continue reading
+  // offline" on the connect screen when there's no Drive token (expired,
+  // or genuinely no connectivity to reach Google at all).
+  //
+  // Cover thumbnails are cached alongside the bytes in a separate bucket
+  // (COVER_CACHE_NAME) so the offline picker can show real cover art
+  // with no network dependency either — see generateAndUploadCover() and
+  // the cacheCoverFromUrl() call in openComic().
   // -------------------------------------------------------------------
-  const CACHED_COMIC_META_KEY = 'panelsCachedComicMeta';
+  const CACHED_COMICS_KEY = 'panelsCachedComics';
 
   function comicCacheKey(driveId) {
     return new Request('https://panels.local/comic-cache/' + encodeURIComponent(driveId));
   }
 
-  function loadCachedComicMeta() {
-    try { return JSON.parse(localStorage.getItem(CACHED_COMIC_META_KEY)); }
-    catch (e) { return null; }
+  function coverCacheKey(driveId) {
+    return new Request('https://panels.local/cover-cache/' + encodeURIComponent(driveId));
   }
 
-  function saveCachedComicMeta(meta) {
-    localStorage.setItem(CACHED_COMIC_META_KEY, JSON.stringify(meta));
+  function loadCachedComics() {
+    try {
+      const arr = JSON.parse(localStorage.getItem(CACHED_COMICS_KEY));
+      return Array.isArray(arr) ? arr : [];
+    } catch (e) { return []; }
   }
 
-  function clearCachedComicMeta() {
-    localStorage.removeItem(CACHED_COMIC_META_KEY);
+  function saveCachedComics(list) {
+    localStorage.setItem(CACHED_COMICS_KEY, JSON.stringify(list));
   }
 
-  // Updates the cached comic's known progress, but only if it's still the
-  // one actually cached — a harmless no-op otherwise (e.g. re-reading an
-  // already-finished comic that's no longer the cached one).
+  function findCachedComicMeta(driveId) {
+    return loadCachedComics().find((c) => c.id === driveId) || null;
+  }
+
+  // Creates (or touches) a comic's local-cache record. Called both when
+  // freshly caching a download and when reopening an already-cached
+  // comic, so lastAccessedAt always reflects true recency for eviction —
+  // re-reading an older cached comic protects it from being evicted.
+  function recordCachedComicAccess(item) {
+    const list = loadCachedComics();
+    const existing = list.find((c) => c.id === item.id);
+    if (existing) {
+      existing.lastAccessedAt = Date.now();
+      existing.name = item.name;
+    } else {
+      list.push({ id: item.id, name: item.name, lastPage: 0, totalPages: 0, lastAccessedAt: Date.now() });
+    }
+    saveCachedComics(list);
+  }
+
+  // Updates a cached comic's known progress, but only if it still has a
+  // slot — a harmless no-op otherwise.
   function updateCachedComicProgress(driveId, lastPage, totalPages) {
-    const meta = loadCachedComicMeta();
-    if (meta && meta.id === driveId) {
-      meta.lastPage = lastPage;
-      meta.totalPages = totalPages;
-      saveCachedComicMeta(meta);
+    const list = loadCachedComics();
+    const entry = list.find((c) => c.id === driveId);
+    if (entry) {
+      entry.lastPage = lastPage;
+      entry.totalPages = totalPages;
+      saveCachedComics(list);
     }
   }
 
@@ -891,19 +946,63 @@
     } catch (e) { return null; }
   }
 
+  async function cacheCoverLocally(driveId, blob) {
+    if (!('caches' in window)) return;
+    try {
+      const cache = await caches.open(COVER_CACHE_NAME);
+      await cache.put(coverCacheKey(driveId), new Response(blob));
+    } catch (e) { /* best effort */ }
+  }
+
+  async function getLocalCoverUrl(driveId) {
+    if (!('caches' in window)) return null;
+    try {
+      const cache = await caches.open(COVER_CACHE_NAME);
+      const resp = await cache.match(coverCacheKey(driveId));
+      if (!resp) return null;
+      return URL.createObjectURL(await resp.blob());
+    } catch (e) { return null; }
+  }
+
+  async function clearLocalCover(driveId) {
+    if (!('caches' in window)) return;
+    try {
+      const cache = await caches.open(COVER_CACHE_NAME);
+      await cache.delete(coverCacheKey(driveId));
+    } catch (e) { /* best effort */ }
+  }
+
+  // Drops the least-recently-accessed comics (bytes + cover) once there
+  // are more than MAX_OFFLINE_SLOTS cached.
+  async function enforceOfflineSlotCap() {
+    const list = loadCachedComics();
+    if (list.length <= MAX_OFFLINE_SLOTS) return;
+    list.sort((a, b) => b.lastAccessedAt - a.lastAccessedAt);
+    const keep = list.slice(0, MAX_OFFLINE_SLOTS);
+    const evict = list.slice(MAX_OFFLINE_SLOTS);
+    if ('caches' in window) {
+      try {
+        const cache = await caches.open(COMIC_CACHE_NAME);
+        await Promise.all(evict.map((e) => cache.delete(comicCacheKey(e.id))));
+      } catch (e) { /* best effort */ }
+    }
+    evict.forEach((e) => clearLocalCover(e.id));
+    saveCachedComics(keep);
+  }
+
   async function cacheComicBuffer(item, buffer) {
+    recordCachedComicAccess(item);
     if (!('caches' in window)) return;
     try {
       const cache = await caches.open(COMIC_CACHE_NAME);
-      const keys = await cache.keys();
-      await Promise.all(keys.map((k) => cache.delete(k)));
       await cache.put(comicCacheKey(item.id), new Response(buffer));
-      saveCachedComicMeta({ id: item.id, name: item.name, lastPage: 0, totalPages: 0 });
+      await enforceOfflineSlotCap();
     } catch (e) { /* best effort — falls back to redownloading next time */ }
   }
 
   async function clearCachedComic(driveId) {
-    clearCachedComicMeta();
+    saveCachedComics(loadCachedComics().filter((c) => c.id !== driveId));
+    clearLocalCover(driveId);
     if (!('caches' in window)) return;
     try {
       const cache = await caches.open(COMIC_CACHE_NAME);
@@ -966,6 +1065,7 @@
       const original = await fetch(firstPageUrl).then((r) => r.blob());
       const thumb = await downscaleForCover(original);
       if (!thumb) return;
+      cacheCoverLocally(driveId, thumb); // local copy for the offline picker, independent of the upload below
       const base64 = await blobToBase64(thumb);
       await fetch(WORKER_URL + '/progress/cover', {
         method: 'POST',
@@ -973,6 +1073,17 @@
         body: JSON.stringify({ driveId, contentType: 'image/jpeg', file: base64, filename: 'cover.jpg' }),
       });
     } catch (e) { /* best effort — listing just keeps the placeholder icon */ }
+  }
+
+  // Mirrors an already-existing cover (fetched from Airtable) into the
+  // local cover cache, so a comic that already had a cover before this
+  // device ever opened it still shows real art in the offline picker.
+  async function cacheCoverFromUrl(driveId, url) {
+    if (!url) return;
+    try {
+      const blob = await fetch(url).then((r) => r.blob());
+      cacheCoverLocally(driveId, blob);
+    } catch (e) { /* best effort */ }
   }
 
   async function openComic(item) {
@@ -989,6 +1100,7 @@
       let buffer = await getCachedComicBuffer(item.id);
       if (buffer) {
         setLoadProgress(60, 'Unpacking pages…');
+        recordCachedComicAccess(item);
       } else {
         buffer = await downloadWithProgress(item.id, item.size ? Number(item.size) : null);
         setLoadProgress(60, 'Unpacking pages…');
@@ -1019,13 +1131,15 @@
               const ok = await ensureProgressRow(item);
               if (ok) generateAndUploadCover(item.id, pages[0].url);
             })();
+          } else {
+            cacheCoverFromUrl(item.id, coverUrl(rec.fields));
           }
         }
       } catch (e) { /* best effort */ }
 
       if (!reachedWorker) {
-        const cachedMeta = loadCachedComicMeta();
-        if (cachedMeta && cachedMeta.id === item.id && typeof cachedMeta.lastPage === 'number') {
+        const cachedMeta = findCachedComicMeta(item.id);
+        if (cachedMeta && typeof cachedMeta.lastPage === 'number') {
           resumeAt = Math.min(cachedMeta.lastPage, pages.length - 1);
         }
       }
@@ -1048,12 +1162,13 @@
   // Opens whichever comic is cached locally straight from Cache Storage —
   // no Drive call, no Google auth, works with zero connectivity. Reached
   // from the "Continue reading offline" card on the connect screen.
-  async function openCachedComicOffline() {
-    const meta = loadCachedComicMeta();
+  async function openCachedComicOffline(driveId) {
+    const meta = findCachedComicMeta(driveId);
     if (!meta) { showToast("That comic isn't available offline anymore."); return; }
     const buffer = await getCachedComicBuffer(meta.id);
     if (!buffer) {
-      clearCachedComicMeta();
+      saveCachedComics(loadCachedComics().filter((c) => c.id !== driveId));
+      clearLocalCover(driveId);
       renderOfflineConnectOption();
       showToast("That comic isn't available offline anymore.");
       return;
@@ -1074,6 +1189,7 @@
       setLoadProgress(100, 'Ready');
       pageIndex = Math.min(meta.lastPage || 0, pages.length - 1);
       sessionLoggedUpTo = pageIndex;
+      recordCachedComicAccess({ id: meta.id, name: meta.name });
       $('scrubber').max = String(pages.length - 1);
       $('reader-title').textContent = stripExt(meta.name);
       renderPage();
@@ -1199,9 +1315,17 @@
     pages.forEach(p => URL.revokeObjectURL(p.url));
     pages = [];
     currentComic = null;
-    showView('library');
-    loadContinueReading();
-    loadCurrentFolder();
+    // Route back to wherever actually makes sense: the library view needs
+    // a valid Drive token (comics opened via openCachedComicOffline() have
+    // none), otherwise back to the connect screen — which re-renders the
+    // offline shelf with this comic's updated progress.
+    if (hasValidToken()) {
+      showView('library');
+      loadContinueReading();
+      loadCurrentFolder();
+    } else {
+      showView('connect');
+    }
   }
 
   // Tap zones
@@ -1275,7 +1399,6 @@
   });
 
   $('btn-connect').addEventListener('click', connectDrive);
-  $('btn-continue-offline').addEventListener('click', openCachedComicOffline);
 
   // ---------------------------------------------------------------------
   // Boot

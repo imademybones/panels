@@ -2,13 +2,14 @@
 // Same pattern as the other trackers' service workers: caches only the
 // same-origin shell (HTML/manifest/icons) so the app still opens with no
 // signal. Google Drive and the Worker/Airtable proxy always go straight to
-// the network. The comic archive itself (whichever one is currently being
-// read) is cached separately by the app's own script under
-// COMIC_CACHE_NAME — kept out of this file's cleanup below so a shell
-// update doesn't evict it mid-read.
+// the network. Cached comic archives and their cover thumbnails are
+// cached separately by the app's own script under COMIC_CACHE_NAME /
+// COVER_CACHE_NAME — kept out of this file's cleanup below so a shell
+// update doesn't evict them.
 
 const CACHE_NAME = 'panels-shell-v1';
 const COMIC_CACHE_NAME = 'panels-comic-cache-v1';
+const COVER_CACHE_NAME = 'panels-cover-cache-v1';
 const SHELL_FILES = [
   './',
   './index.html',
@@ -30,7 +31,7 @@ self.addEventListener('activate', (event) => {
     caches.keys().then((names) =>
       Promise.all(
         names
-          .filter((n) => n !== CACHE_NAME && n !== COMIC_CACHE_NAME)
+          .filter((n) => n !== CACHE_NAME && n !== COMIC_CACHE_NAME && n !== COVER_CACHE_NAME)
           .map((n) => caches.delete(n))
       )
     )
