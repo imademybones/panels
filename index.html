@@ -1054,13 +1054,43 @@
     loadFavoritesShelf();
   }
 
+  // Walks a folder's real ancestry via Drive's "parents" field up to the
+  // account root, so navigating to it shows its actual path instead of a
+  // flat "My Drive > [Folder]" stand-in. One pair of API calls per level
+  // (get this node's parent id, then that parent's own name/parents) —
+  // fine for a one-off navigation tap; typical library depths are shallow.
+  // Falls back to whatever it resolved so far if a lookup fails partway.
+  async function resolveBreadcrumbPath(id, name) {
+    const chain = [{ id, name }];
+    let currentId = id;
+    for (let i = 0; i < 20; i++) {
+      let meta;
+      try {
+        meta = await driveFetch('/files/' + currentId, { fields: 'parents' });
+      } catch (e) { break; }
+      const parentId = meta.parents && meta.parents[0];
+      if (!parentId) break;
+      let parentMeta;
+      try {
+        parentMeta = await driveFetch('/files/' + parentId, { fields: 'name,parents' });
+      } catch (e) { break; }
+      const isAccountRoot = !parentMeta.parents || parentMeta.parents.length === 0;
+      if (isAccountRoot) break; // parentId is "My Drive" itself — represented by the crumb below
+      chain.unshift({ id: parentId, name: parentMeta.name });
+      currentId = parentId;
+    }
+    chain.unshift({ id: 'root', name: 'My Drive' });
+    return chain;
+  }
+
   // Navigates into a folder without assuming it's a child of wherever
-  // you're currently browsing — resets the breadcrumb to a fresh
-  // "My Drive > [Folder]" trail rather than inheriting an unrelated path.
-  // Used for favorited-folder and search-result taps, whose true
-  // ancestry in the Drive tree isn't known.
-  function openFolderDirect(id, name) {
-    crumbs = [{ id: 'root', name: 'My Drive' }, { id, name }];
+  // you're currently browsing — resolves its real breadcrumb path via
+  // resolveBreadcrumbPath() instead. Used for favorited-folder and
+  // search-result taps, whose position relative to the current browsing
+  // location isn't known.
+  async function openFolderDirect(id, name) {
+    $('folder-list').innerHTML = '<div class="loading-state">Loading…</div>';
+    crumbs = await resolveBreadcrumbPath(id, name);
     saveCrumbs();
     renderBreadcrumb();
     loadCurrentFolder();
