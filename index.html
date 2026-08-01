@@ -95,6 +95,21 @@
   .stat-tile .stat-label{font-size:12px;color:var(--muted);margin-top:4px;}
   .stat-tile.wide{grid-column:1 / -1;display:flex;align-items:center;justify-content:space-between;}
   .stat-tile.wide .stat-value{font-size:22px;}
+  .settings-section{margin-top:18px;}
+  .settings-section:first-child{margin-top:6px;}
+  .settings-label{font-size:13px;font-weight:700;margin-bottom:10px;}
+  .settings-label span{font-weight:500;color:var(--muted);}
+  .cache-item{
+    display:flex;align-items:center;gap:10px;padding:11px 4px;
+    border-bottom:1px solid var(--border);
+  }
+  .cache-item .name{flex:1;min-width:0;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .cache-item .meta{font-size:12px;color:var(--muted);flex-shrink:0;}
+  .cache-item-remove{
+    background:none;border:none;color:var(--muted);font-size:15px;cursor:pointer;
+    padding:6px;flex-shrink:0;
+  }
+  .cache-item-remove:active{transform:scale(0.85);}
   header.topbar{
     display:flex;align-items:center;justify-content:space-between;
     padding:16px 18px 10px;flex-shrink:0;
@@ -116,7 +131,20 @@
   .breadcrumb button:last-child{color:var(--ink);}
   .breadcrumb .sep{color:var(--border);}
 
-  .refresh-row{padding:0 18px 4px;flex-shrink:0;}
+  .refresh-row{
+    padding:0 18px 4px;flex-shrink:0;
+    display:flex;align-items:center;justify-content:space-between;gap:10px;
+  }
+  .list-controls{display:flex;align-items:center;gap:8px;}
+  .sort-select{
+    background:var(--surface);border:1px solid var(--border);border-radius:8px;
+    padding:5px 8px;font-size:12.5px;font-family:inherit;color:var(--ink);
+  }
+  .filter-chip{
+    background:var(--surface);border:1px solid var(--border);border-radius:8px;
+    padding:5px 9px;font-size:12.5px;font-weight:600;color:var(--muted);cursor:pointer;
+  }
+  .filter-chip.active{background:var(--accent);border-color:var(--accent);color:#fff;}
   .search-row{padding:0 18px 10px;flex-shrink:0;}
   .search-input{
     width:100%;background:var(--surface);border:1px solid var(--border);
@@ -126,7 +154,14 @@
   .search-input::placeholder{color:var(--muted);}
   .search-input:focus{outline:none;border-color:var(--accent);}
 
-  main.scroll{flex:1;overflow-y:auto;padding:4px 18px 40px;}
+  main.scroll{flex:1;overflow-y:auto;padding:4px 18px 40px;position:relative;}
+  .pull-indicator{
+    position:absolute;top:-42px;left:50%;transform:translateX(-50%);
+    width:28px;height:28px;display:flex;align-items:center;justify-content:center;
+    font-size:16px;color:var(--muted);opacity:0;pointer-events:none;
+  }
+  .pull-indicator.spinning{animation:pull-spin .7s linear infinite;}
+  @keyframes pull-spin{to{transform:translateX(-50%) rotate(360deg);}}
 
   /* Reading streak + daily goal */
   .streak-goal-card{
@@ -220,6 +255,15 @@
     cursor:pointer;padding:6px;flex-shrink:0;opacity:.7;transition:transform .12s ease;
   }
   .row-order:active{transform:scale(0.8);}
+  .row-menu{
+    background:none;border:none;font-size:19px;line-height:1;color:var(--muted);
+    cursor:pointer;padding:6px 10px;flex-shrink:0;transition:transform .12s ease;
+  }
+  .row-menu:active{transform:scale(0.8);}
+  .row-action-item{
+    background:none;border:none;width:100%;text-align:left;font:inherit;color:inherit;
+    text-decoration:none;
+  }
   .row-order-move{
     background:none;border:none;font-size:16px;color:var(--muted);cursor:pointer;
     padding:4px 6px;flex-shrink:0;
@@ -248,7 +292,10 @@
     flex:1;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;
   }
   .reader-stage img{
-    max-width:100%;max-height:100%;object-fit:contain;transition:opacity .12s ease;
+    max-width:100%;max-height:100%;object-fit:contain;opacity:0;transition:opacity .16s ease;
+  }
+  .reader-stage img.page-visible{
+    opacity:1;
   }
   .reader-stage img.zoomed{
     max-width:none;max-height:none;width:auto;height:auto;
@@ -353,6 +400,7 @@
     <div class="topbar-actions">
       <button class="link-btn" id="btn-orders">Orders</button>
       <button class="link-btn" id="btn-stats">Stats</button>
+      <button class="link-btn" id="btn-settings" aria-label="Settings">⚙</button>
       <button class="link-btn" id="btn-disconnect">Disconnect</button>
     </div>
   </header>
@@ -363,9 +411,18 @@
   </div>
   <div class="refresh-row">
     <button class="link-btn" id="btn-refresh">↻ Refresh</button>
+    <div class="list-controls">
+      <select class="sort-select" id="sort-select">
+        <option value="name">Name</option>
+        <option value="recent">Recently added</option>
+        <option value="unread">Unread first</option>
+      </select>
+      <button class="filter-chip" id="filter-favorites">★ Favorites</button>
+    </div>
   </div>
 
   <main class="scroll" id="library-main">
+    <div class="pull-indicator" id="pull-indicator">↻</div>
     <div class="streak-goal-card" id="streak-goal-card"></div>
     <div id="nextup-shelf-wrap"></div>
     <div id="favorites-shelf-wrap"></div>
@@ -394,6 +451,27 @@
   </header>
   <main class="scroll" id="stats-main">
     <div class="stats-grid" id="stats-grid"></div>
+  </main>
+</div>
+
+<!-- ================= SETTINGS SCREEN ================= -->
+<div id="view-settings" class="hidden">
+  <header class="topbar">
+    <h1>Settings<span>.</span></h1>
+    <button class="link-btn" id="btn-settings-back">Back</button>
+  </header>
+  <main class="scroll" id="settings-main">
+    <div class="settings-section">
+      <div class="settings-label">Daily reading goal</div>
+      <div class="modal-new-row">
+        <input type="number" id="settings-goal-input" min="1" inputmode="numeric" />
+        <button class="btn btn-outline" id="btn-settings-save-goal">Save</button>
+      </div>
+    </div>
+    <div class="settings-section">
+      <div class="settings-label">Offline cache <span id="settings-cache-count"></span></div>
+      <div id="settings-cache-list"></div>
+    </div>
   </main>
 </div>
 
@@ -456,6 +534,20 @@
     <p class="modal-desc">You'll need to reconnect to browse or download new comics. Anything already cached offline stays available.</p>
     <button class="btn" id="btn-confirm-disconnect">Disconnect</button>
     <button class="link-btn" id="btn-cancel-disconnect-modal">Cancel</button>
+  </div>
+</div>
+
+<!-- ================= ROW ACTIONS MENU ================= -->
+<div id="row-actions-modal" class="modal-overlay hidden">
+  <div class="modal-card">
+    <div class="modal-title" id="row-actions-title"></div>
+    <div class="modal-list">
+      <button class="modal-list-item row-action-item" id="ra-favorite"></button>
+      <button class="modal-list-item row-action-item" id="ra-read"></button>
+      <button class="modal-list-item row-action-item" id="ra-order">📑 Add to reading order</button>
+      <a class="modal-list-item row-action-item" id="ra-search" target="_blank" rel="noopener">🔍 Search on League of Comic Geeks</a>
+    </div>
+    <button class="link-btn" id="btn-cancel-row-actions">Cancel</button>
   </div>
 </div>
 
@@ -679,9 +771,11 @@
     $('view-reader').classList.toggle('hidden', name !== 'reader');
     $('view-stats').classList.toggle('hidden', name !== 'stats');
     $('view-orders').classList.toggle('hidden', name !== 'orders');
+    $('view-settings').classList.toggle('hidden', name !== 'settings');
     if (name === 'connect') renderOfflineConnectOption();
     if (name === 'stats') renderStats();
     if (name === 'orders') renderOrdersList();
+    if (name === 'settings') renderSettings();
   }
 
   function enterLibrary() {
@@ -717,7 +811,7 @@
     do {
       const data = await driveFetch('/files', {
         q: `'${folderId}' in parents and trashed = false`,
-        fields: 'nextPageToken, files(id,name,mimeType,size)',
+        fields: 'nextPageToken, files(id,name,mimeType,size,createdTime)',
         orderBy: 'folder,name',
         pageSize: '1000',
         ...(pageToken ? { pageToken } : {}),
@@ -967,10 +1061,11 @@
         </div>
         ${p && p['Total Pages'] ? `<div class="progress-track"><div class="progress-fill" style="width:${Math.min(100, Math.round(100 * (p['Last Page'] || 0) / p['Total Pages']))}%"></div></div>` : ''}
       </div>
-      <a class="row-search" href="${escapeHtml(lcgSearchUrl(item.name))}" target="_blank" rel="noopener" aria-label="Search on League of Comic Geeks">🔍</a>
-      ${isFolder ? '' : `<button class="row-read ${isFinished ? 'active' : ''}" aria-label="${isFinished ? 'Mark as unread' : 'Mark as read'}">${isFinished ? '✓' : '○'}</button>`}
-      ${isFolder ? '' : `<button class="row-order" aria-label="Add to reading order">📑</button>`}
-      <button class="row-star ${isFavorite ? 'active' : ''}" aria-label="Favorite">${isFavorite ? '★' : '☆'}</button>
+      <button class="row-menu" aria-label="More actions">⋯</button>
+      <a class="row-search hidden" href="${escapeHtml(lcgSearchUrl(item.name))}" target="_blank" rel="noopener" aria-label="Search on League of Comic Geeks">🔍</a>
+      ${isFolder ? '' : `<button class="row-read hidden ${isFinished ? 'active' : ''}" aria-label="${isFinished ? 'Mark as unread' : 'Mark as read'}">${isFinished ? '✓' : '○'}</button>`}
+      ${isFolder ? '' : `<button class="row-order hidden" aria-label="Add to reading order">📑</button>`}
+      <button class="row-star hidden ${isFavorite ? 'active' : ''}" aria-label="Favorite">${isFavorite ? '★' : '☆'}</button>
     `;
     row.addEventListener('click', () => {
       if (isFolder) openFolderFn(item.id, item.name);
@@ -992,7 +1087,96 @@
         openOrderModal(item);
       });
     }
+    row.querySelector('.row-menu').addEventListener('click', (e) => {
+      e.stopPropagation();
+      openRowActionsMenu(item, isFolder, row);
+    });
     return row;
+  }
+
+  // Row actions overflow menu — the row keeps its original (hidden)
+  // favorite/read/order/search controls fully wired as before; the menu
+  // just reads their live state and forwards taps to them via .click(),
+  // so none of the existing toggle logic has to be duplicated.
+  let rowActionsRow = null;
+
+  function openRowActionsMenu(item, isFolder, row) {
+    rowActionsRow = row;
+    $('row-actions-title').textContent = isFolder ? item.name : stripExt(item.name);
+
+    const isFavorite = row.querySelector('.row-star').classList.contains('active');
+    $('ra-favorite').textContent = isFavorite ? '★ Remove favorite' : '☆ Add favorite';
+
+    const rowRead = row.querySelector('.row-read');
+    if (rowRead) {
+      const isFinished = rowRead.classList.contains('active');
+      $('ra-read').textContent = isFinished ? '○ Mark as unread' : '✓ Mark as read';
+      $('ra-read').classList.remove('hidden');
+      $('ra-order').classList.remove('hidden');
+    } else {
+      $('ra-read').classList.add('hidden');
+      $('ra-order').classList.add('hidden');
+    }
+
+    $('ra-search').href = lcgSearchUrl(item.name);
+    $('row-actions-modal').classList.remove('hidden');
+  }
+
+  function closeRowActionsMenu() {
+    $('row-actions-modal').classList.add('hidden');
+    rowActionsRow = null;
+  }
+
+  // ---------------------------------------------------------------------
+  // Sort/filter for folder browsing + search — applied client-side over
+  // whatever was last fetched, so switching sort/filter never re-hits
+  // Drive. 'name' matches Drive's own folder,name ordering (the prior
+  // fixed behavior); 'recent' and 'unread' are the two extra sorts;
+  // favorites-only is an independent filter layered on top of either.
+  // ---------------------------------------------------------------------
+  let listSort = localStorage.getItem('panelsListSort') || 'name';
+  let listFavoritesOnly = localStorage.getItem('panelsListFavoritesOnly') === '1';
+  let lastListState = null; // { items, progressMap, favoriteFolderIds, openFolderFn, emptyMessage }
+
+  function applySortFilter(items, progressMap, favoriteFolderIds) {
+    let result = items;
+    if (listFavoritesOnly) {
+      result = result.filter((item) => {
+        const isFolder = item.mimeType === 'application/vnd.google-apps.folder';
+        return isFolder
+          ? favoriteFolderIds.has(item.id)
+          : !!(progressMap[item.id] && progressMap[item.id]['Favorite']);
+      });
+    }
+    if (listSort === 'recent') {
+      result = [...result].sort((a, b) => new Date(b.createdTime || 0) - new Date(a.createdTime || 0));
+    } else if (listSort === 'unread') {
+      result = [...result].sort((a, b) => {
+        const aDone = !!(progressMap[a.id] && progressMap[a.id]['Finished']);
+        const bDone = !!(progressMap[b.id] && progressMap[b.id]['Finished']);
+        return aDone === bDone ? 0 : (aDone ? 1 : -1);
+      });
+    }
+    return result;
+  }
+
+  function renderFolderList() {
+    if (!lastListState) return;
+    const { items, progressMap, favoriteFolderIds, openFolderFn, emptyMessage } = lastListState;
+    const list = $('folder-list');
+    const filtered = applySortFilter(items, progressMap, favoriteFolderIds);
+    $('az-rail').classList.add('hidden');
+    if (filtered.length === 0) {
+      list.innerHTML = '<div class="empty-state">' + (listFavoritesOnly ? 'No favorites here.' : escapeHtml(emptyMessage)) + '</div>';
+      return;
+    }
+    list.innerHTML = '';
+    filtered.forEach(item => {
+      const row = buildItemRow(item, progressMap, favoriteFolderIds, openFolderFn);
+      row.setAttribute('data-first-letter', firstLetterOf(itemDisplayName(item)));
+      list.appendChild(row);
+    });
+    renderAzRail(filtered);
   }
 
   async function loadCurrentFolder() {
@@ -1004,17 +1188,13 @@
     try {
       const items = await listFolder(current.id);
       if (items.length === 0) {
+        lastListState = { items: [], progressMap: {}, favoriteFolderIds: new Set(), openFolderFn: openFolder, emptyMessage: 'No folders or comics (.cbz/.cbr) here.' };
         list.innerHTML = '<div class="empty-state">No folders or comics (.cbz/.cbr) here.</div>';
         return;
       }
       const [progressMap, favoriteFolderIds] = await Promise.all([fetchProgressMap(), fetchFavoriteFolderIds()]);
-      list.innerHTML = '';
-      items.forEach(item => {
-        const row = buildItemRow(item, progressMap, favoriteFolderIds, openFolder);
-        row.setAttribute('data-first-letter', firstLetterOf(itemDisplayName(item)));
-        list.appendChild(row);
-      });
-      renderAzRail(items);
+      lastListState = { items, progressMap, favoriteFolderIds, openFolderFn: openFolder, emptyMessage: 'No folders or comics (.cbz/.cbr) here.' };
+      renderFolderList();
     } catch (err) {
       list.innerHTML = '<div class="empty-state">' + escapeHtml(err.message || 'Something went wrong.') + '</div>';
     }
@@ -1027,17 +1207,13 @@
     try {
       const items = await searchComics(query);
       if (items.length === 0) {
+        lastListState = { items: [], progressMap: {}, favoriteFolderIds: new Set(), openFolderFn: openFolderDirect, emptyMessage: 'No matches for "' + query + '".' };
         list.innerHTML = '<div class="empty-state">No matches for "' + escapeHtml(query) + '".</div>';
         return;
       }
       const [progressMap, favoriteFolderIds] = await Promise.all([fetchProgressMap(), fetchFavoriteFolderIds()]);
-      list.innerHTML = '';
-      items.forEach(item => {
-        const row = buildItemRow(item, progressMap, favoriteFolderIds, openFolderDirect);
-        row.setAttribute('data-first-letter', firstLetterOf(itemDisplayName(item)));
-        list.appendChild(row);
-      });
-      renderAzRail(items);
+      lastListState = { items, progressMap, favoriteFolderIds, openFolderFn: openFolderDirect, emptyMessage: 'No matches for "' + query + '".' };
+      renderFolderList();
     } catch (err) {
       list.innerHTML = '<div class="empty-state">' + escapeHtml(err.message || 'Something went wrong.') + '</div>';
     }
@@ -1143,10 +1319,7 @@
     $('goal-modal').classList.add('hidden');
   }
 
-  async function saveGoalFromModal() {
-    const n = parseInt($('goal-input').value, 10);
-    if (!Number.isFinite(n) || n <= 0) { showToast('Enter a positive number of pages.'); return; }
-    closeGoalModal();
+  async function saveGoal(n) {
     dailyGoal = n;
     renderStreakGoalCard();
     try {
@@ -1156,6 +1329,62 @@
         body: JSON.stringify({ fields: { 'Daily Goal Pages': n } }),
       });
     } catch (e) { /* best effort */ }
+  }
+
+  async function saveGoalFromModal() {
+    const n = parseInt($('goal-input').value, 10);
+    if (!Number.isFinite(n) || n <= 0) { showToast('Enter a positive number of pages.'); return; }
+    closeGoalModal();
+    await saveGoal(n);
+  }
+
+  async function saveGoalFromSettings() {
+    const n = parseInt($('settings-goal-input').value, 10);
+    if (!Number.isFinite(n) || n <= 0) { showToast('Enter a positive number of pages.'); return; }
+    await saveGoal(n);
+    showToast('Daily goal updated.');
+  }
+
+  // ---------------------------------------------------------------------
+  // Settings screen — daily goal (mirrors the streak-card modal) plus
+  // visibility/management of the offline comic cache, which previously
+  // had no UI at all beyond the fixed 3-slot LRU eviction happening
+  // silently in the background.
+  // ---------------------------------------------------------------------
+  async function renderSettingsCache() {
+    const listEl = $('settings-cache-list');
+    const countEl = $('settings-cache-count');
+    listEl.innerHTML = '<div class="loading-state">Loading…</div>';
+    const list = loadCachedComics();
+    const present = [];
+    for (const meta of list) {
+      if (await hasCachedComic(meta.id)) present.push(meta);
+    }
+    present.sort((a, b) => b.lastAccessedAt - a.lastAccessedAt);
+    countEl.textContent = '(' + present.length + ' / ' + MAX_OFFLINE_SLOTS + ' slots used)';
+    if (present.length === 0) {
+      listEl.innerHTML = '<div class="modal-empty">Nothing cached for offline reading yet.</div>';
+      return;
+    }
+    listEl.innerHTML = present.map((meta) => `
+      <div class="cache-item" data-drive-id="${escapeHtml(meta.id)}">
+        <div class="name">${escapeHtml(stripExt(meta.name))}</div>
+        <div class="meta">${meta.lastPage || 0} / ${meta.totalPages || '?'}</div>
+        <button class="cache-item-remove" aria-label="Remove from offline cache">✕</button>
+      </div>
+    `).join('');
+    listEl.querySelectorAll('.cache-item-remove').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        const id = e.currentTarget.closest('.cache-item').getAttribute('data-drive-id');
+        await clearCachedComic(id);
+        renderSettingsCache();
+      });
+    });
+  }
+
+  function renderSettings() {
+    $('settings-goal-input').value = String(dailyGoal);
+    renderSettingsCache();
   }
 
   function logPagesRead(delta) {
@@ -2186,8 +2415,10 @@
 
   function renderPage() {
     const img = $('reader-img');
+    img.classList.remove('page-visible');
     img.src = pages[pageIndex].url;
     img.classList.toggle('zoomed', zoomed);
+    requestAnimationFrame(() => requestAnimationFrame(() => img.classList.add('page-visible')));
     $('reader-count').textContent = (pageIndex + 1) + ' / ' + pages.length;
     $('scrubber').value = String(pageIndex);
     queueSave();
@@ -2356,6 +2587,70 @@
     loadCurrentFolder();
   });
 
+  // Pull-to-refresh — a touch gesture on the library scroll view doing
+  // the same work as btn-refresh, only armed when already scrolled to
+  // the top so it never fights normal downward scrolling.
+  (function setupPullToRefresh() {
+    const main = $('library-main');
+    const indicator = $('pull-indicator');
+    const THRESHOLD = 64;
+    let startY = null;
+    let pulling = false;
+    let refreshing = false;
+
+    main.addEventListener('touchstart', (e) => {
+      if (main.scrollTop > 0 || refreshing) { startY = null; pulling = false; return; }
+      startY = e.touches[0].clientY;
+      pulling = true;
+    }, { passive: true });
+
+    main.addEventListener('touchmove', (e) => {
+      if (!pulling || startY === null) return;
+      const delta = e.touches[0].clientY - startY;
+      if (delta <= 0) { main.style.transform = ''; indicator.style.opacity = '0'; return; }
+      const pull = Math.min(delta * 0.5, THRESHOLD + 20);
+      main.style.transform = `translateY(${pull}px)`;
+      indicator.style.opacity = String(Math.min(pull / THRESHOLD, 1));
+      indicator.classList.toggle('spinning', pull >= THRESHOLD);
+    }, { passive: true });
+
+    main.addEventListener('touchend', () => {
+      if (!pulling) return;
+      pulling = false;
+      const pulledEnough = indicator.classList.contains('spinning');
+      main.style.transition = 'transform .2s ease';
+      main.style.transform = '';
+      setTimeout(() => { main.style.transition = ''; }, 200);
+      if (pulledEnough && !refreshing) {
+        refreshing = true;
+        Promise.all([loadNextUpShelf(), loadFavoritesShelf(), loadContinueReading(), loadCurrentFolder()])
+          .finally(() => {
+            refreshing = false;
+            indicator.style.opacity = '0';
+            indicator.classList.remove('spinning');
+          });
+      } else {
+        indicator.style.opacity = '0';
+        indicator.classList.remove('spinning');
+      }
+      startY = null;
+    });
+  })();
+
+  $('sort-select').value = listSort;
+  $('sort-select').addEventListener('change', (e) => {
+    listSort = e.target.value;
+    localStorage.setItem('panelsListSort', listSort);
+    renderFolderList();
+  });
+  $('filter-favorites').classList.toggle('active', listFavoritesOnly);
+  $('filter-favorites').addEventListener('click', () => {
+    listFavoritesOnly = !listFavoritesOnly;
+    localStorage.setItem('panelsListFavoritesOnly', listFavoritesOnly ? '1' : '0');
+    $('filter-favorites').classList.toggle('active', listFavoritesOnly);
+    renderFolderList();
+  });
+
   let searchDebounce = null;
   $('search-input').addEventListener('input', (e) => {
     clearTimeout(searchDebounce);
@@ -2366,6 +2661,10 @@
 
   $('btn-stats').addEventListener('click', () => showView('stats'));
   $('btn-stats-back').addEventListener('click', () => showView('library'));
+
+  $('btn-settings').addEventListener('click', () => showView('settings'));
+  $('btn-settings-back').addEventListener('click', () => showView('library'));
+  $('btn-settings-save-goal').addEventListener('click', saveGoalFromSettings);
 
   $('btn-orders').addEventListener('click', () => showView('orders'));
   $('btn-orders-back').addEventListener('click', () => {
@@ -2388,6 +2687,24 @@
     if (e.target.id === 'goal-modal') closeGoalModal();
   });
   $('btn-save-goal').addEventListener('click', saveGoalFromModal);
+
+  $('btn-cancel-row-actions').addEventListener('click', closeRowActionsMenu);
+  $('row-actions-modal').addEventListener('click', (e) => {
+    if (e.target.id === 'row-actions-modal') closeRowActionsMenu();
+  });
+  $('ra-favorite').addEventListener('click', () => {
+    if (rowActionsRow) rowActionsRow.querySelector('.row-star').click();
+    closeRowActionsMenu();
+  });
+  $('ra-read').addEventListener('click', () => {
+    if (rowActionsRow) rowActionsRow.querySelector('.row-read').click();
+    closeRowActionsMenu();
+  });
+  $('ra-order').addEventListener('click', () => {
+    if (rowActionsRow) rowActionsRow.querySelector('.row-order').click();
+    closeRowActionsMenu();
+  });
+  $('ra-search').addEventListener('click', closeRowActionsMenu);
 
   // ---------------------------------------------------------------------
   // Boot
