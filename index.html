@@ -69,6 +69,18 @@
 
   /* ---------- Library shell ---------- */
   #view-library, #view-stats, #view-orders{height:100%;display:flex;flex-direction:column;}
+  #view-library{position:relative;}
+  #az-rail{
+    position:absolute;right:2px;top:50%;transform:translateY(-50%);
+    display:flex;flex-direction:column;align-items:center;
+    background:rgba(255,255,255,.88);border-radius:12px;padding:4px 2px;
+    z-index:5;
+  }
+  .az-letter{
+    background:none;border:none;font-size:10px;font-weight:700;color:var(--muted);
+    padding:1.5px 4px;line-height:1.3;cursor:pointer;
+  }
+  .az-letter:active{color:var(--accent);}
   .stats-grid{
     display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;
   }
@@ -354,6 +366,7 @@
     <div id="continue-shelf-wrap"></div>
     <div id="folder-list"></div>
   </main>
+  <div id="az-rail" class="hidden"></div>
 </div>
 
 <!-- ================= READING ORDERS SCREEN ================= -->
@@ -864,6 +877,43 @@
     loadCurrentFolder();
   }
 
+  // A-Z quick-jump rail — shown only once a list is long enough to
+  // actually need it, built from whatever letters are present rather than
+  // the full alphabet (no dead taps). Doesn't touch sort order or
+  // buildItemRow: it just tags each rendered row with its own first
+  // letter and scrolls to the first match on tap.
+  const AZ_RAIL_THRESHOLD = 18;
+
+  function itemDisplayName(item) {
+    return item.mimeType === 'application/vnd.google-apps.folder' ? item.name : stripExt(item.name);
+  }
+
+  function firstLetterOf(name) {
+    const ch = (name.trim()[0] || '#').toUpperCase();
+    return /[A-Z]/.test(ch) ? ch : '#';
+  }
+
+  function renderAzRail(items) {
+    const rail = $('az-rail');
+    if (items.length < AZ_RAIL_THRESHOLD) {
+      rail.innerHTML = '';
+      rail.classList.add('hidden');
+      return;
+    }
+    const present = new Set(items.map((item) => firstLetterOf(itemDisplayName(item))));
+    const letters = ['#', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')].filter((l) => present.has(l));
+    rail.innerHTML = letters.map((l) => `<button class="az-letter" data-letter="${l}">${l}</button>`).join('');
+    rail.classList.remove('hidden');
+    rail.querySelectorAll('.az-letter').forEach((btn) => {
+      btn.addEventListener('click', () => jumpToLetter(btn.getAttribute('data-letter')));
+    });
+  }
+
+  function jumpToLetter(letter) {
+    const target = document.querySelector('#folder-list .row[data-first-letter="' + letter + '"]');
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
   // Builds one folder/comic row — shared by normal folder browsing and
   // search results, so both get identical cover art, favorite star,
   // LCG link, and progress display. openFolderFn lets the caller decide
@@ -920,6 +970,7 @@
     $('search-input').value = '';
     const list = $('folder-list');
     list.innerHTML = '<div class="loading-state">Loading…</div>';
+    $('az-rail').classList.add('hidden');
     const current = crumbs[crumbs.length - 1];
     try {
       const items = await listFolder(current.id);
@@ -929,7 +980,12 @@
       }
       const [progressMap, favoriteFolderIds] = await Promise.all([fetchProgressMap(), fetchFavoriteFolderIds()]);
       list.innerHTML = '';
-      items.forEach(item => list.appendChild(buildItemRow(item, progressMap, favoriteFolderIds, openFolder)));
+      items.forEach(item => {
+        const row = buildItemRow(item, progressMap, favoriteFolderIds, openFolder);
+        row.setAttribute('data-first-letter', firstLetterOf(itemDisplayName(item)));
+        list.appendChild(row);
+      });
+      renderAzRail(items);
     } catch (err) {
       list.innerHTML = '<div class="empty-state">' + escapeHtml(err.message || 'Something went wrong.') + '</div>';
     }
@@ -938,6 +994,7 @@
   async function runSearch(query) {
     const list = $('folder-list');
     list.innerHTML = '<div class="loading-state">Searching…</div>';
+    $('az-rail').classList.add('hidden');
     try {
       const items = await searchComics(query);
       if (items.length === 0) {
@@ -946,7 +1003,12 @@
       }
       const [progressMap, favoriteFolderIds] = await Promise.all([fetchProgressMap(), fetchFavoriteFolderIds()]);
       list.innerHTML = '';
-      items.forEach(item => list.appendChild(buildItemRow(item, progressMap, favoriteFolderIds, openFolderDirect)));
+      items.forEach(item => {
+        const row = buildItemRow(item, progressMap, favoriteFolderIds, openFolderDirect);
+        row.setAttribute('data-first-letter', firstLetterOf(itemDisplayName(item)));
+        list.appendChild(row);
+      });
+      renderAzRail(items);
     } catch (err) {
       list.innerHTML = '<div class="empty-state">' + escapeHtml(err.message || 'Something went wrong.') + '</div>';
     }
