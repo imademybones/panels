@@ -71,15 +71,15 @@
   #view-library, #view-stats, #view-orders{height:100%;display:flex;flex-direction:column;}
   #view-library{position:relative;}
   #az-rail{
-    position:absolute;right:2px;top:50%;transform:translateY(-50%);
-    display:flex;flex-direction:column;align-items:center;
-    background:rgba(255,255,255,.9);border-radius:16px;padding:6px 3px;
-    z-index:5;max-height:82vh;overflow-y:auto;scrollbar-width:none;
+    position:sticky;top:0;z-index:5;
+    display:flex;overflow-x:auto;gap:2px;
+    background:var(--bg);padding:4px 0 6px;margin-bottom:2px;
+    border-bottom:1px solid var(--border);scrollbar-width:none;
   }
   #az-rail::-webkit-scrollbar{display:none;}
   .az-letter{
     background:none;border:none;font-size:13px;font-weight:700;color:var(--muted);
-    padding:5px 9px;line-height:1;cursor:pointer;min-width:26px;
+    padding:8px 9px;line-height:1;cursor:pointer;flex-shrink:0;
   }
   .az-letter:active{color:var(--accent);}
   .stats-grid{
@@ -182,6 +182,7 @@
   /* Continue reading shelf */
   .shelf-title{font-size:12.5px;font-weight:700;text-transform:uppercase;
     letter-spacing:.06em;color:var(--muted);margin:14px 0 8px;}
+  .shelf-empty-hint{font-size:12.5px;color:var(--muted);padding:0 2px 4px;line-height:1.4;}
   .cv-credit{
     text-transform:none;letter-spacing:normal;font-weight:600;font-size:11px;
     color:var(--muted);opacity:.65;text-decoration:none;margin-left:6px;
@@ -255,6 +256,13 @@
     cursor:pointer;padding:6px;flex-shrink:0;opacity:.7;transition:transform .12s ease;
   }
   .row-order:active{transform:scale(0.8);}
+  .row-download{
+    background:none;border:none;font-size:15px;line-height:1;color:var(--muted);
+    cursor:pointer;padding:6px;flex-shrink:0;opacity:.7;transition:transform .12s ease;
+  }
+  .row-download.active{color:var(--accent);opacity:1;}
+  .row-download:active{transform:scale(0.8);}
+  .row-download:disabled{opacity:.4;}
   .row-menu{
     background:none;border:none;font-size:19px;line-height:1;color:var(--muted);
     cursor:pointer;padding:6px 10px;flex-shrink:0;transition:transform .12s ease;
@@ -427,9 +435,10 @@
     <div id="nextup-shelf-wrap"></div>
     <div id="favorites-shelf-wrap"></div>
     <div id="continue-shelf-wrap"></div>
+    <div id="offline-shelf-wrap"></div>
+    <div id="az-rail" class="hidden"></div>
     <div id="folder-list"></div>
   </main>
-  <div id="az-rail" class="hidden"></div>
 </div>
 
 <!-- ================= READING ORDERS SCREEN ================= -->
@@ -545,6 +554,7 @@
       <button class="modal-list-item row-action-item" id="ra-favorite"></button>
       <button class="modal-list-item row-action-item" id="ra-read"></button>
       <button class="modal-list-item row-action-item" id="ra-order">📑 Add to reading order</button>
+      <button class="modal-list-item row-action-item" id="ra-download"></button>
       <a class="modal-list-item row-action-item" id="ra-search" target="_blank" rel="noopener">🔍 Search on League of Comic Geeks</a>
     </div>
     <button class="link-btn" id="btn-cancel-row-actions">Cancel</button>
@@ -616,6 +626,7 @@
   const COMIC_CACHE_NAME = 'panels-comic-cache-v1';
   const COVER_CACHE_NAME = 'panels-cover-cache-v1';
   const MAX_OFFLINE_SLOTS = 3;
+  const MAX_PINNED_DOWNLOADS = 10;
 
   const NEEDS_SETUP = GOOGLE_CLIENT_ID.startsWith('PASTE_');
 
@@ -674,12 +685,15 @@
   }
 
   // ---------------------------------------------------------------------
-  // Auth (Google Identity Services token client, session-only — same
-  // pattern as the other trackers' Calendar integration)
+  // Auth (Google Identity Services token client). Stored in localStorage
+  // rather than sessionStorage so a still-valid token (Google issues them
+  // for ~1hr) survives a PWA relaunch — on iOS/Android, reopening an
+  // installed app is often a fresh browsing session, and sessionStorage
+  // doesn't carry over even though the token itself is still good.
   // ---------------------------------------------------------------------
   let tokenClient = null;
-  let accessToken = sessionStorage.getItem('panelsAccessToken') || null;
-  let tokenExpiry = Number(sessionStorage.getItem('panelsTokenExpiry') || 0);
+  let accessToken = localStorage.getItem('panelsAccessToken') || null;
+  let tokenExpiry = Number(localStorage.getItem('panelsTokenExpiry') || 0);
 
   function hasValidToken() {
     return accessToken && Date.now() < tokenExpiry;
@@ -697,27 +711,31 @@
         }
         accessToken = resp.access_token;
         tokenExpiry = Date.now() + (Number(resp.expires_in || 3500) * 1000);
-        sessionStorage.setItem('panelsAccessToken', accessToken);
-        sessionStorage.setItem('panelsTokenExpiry', String(tokenExpiry));
+        localStorage.setItem('panelsAccessToken', accessToken);
+        localStorage.setItem('panelsTokenExpiry', String(tokenExpiry));
         enterLibrary();
       },
     });
   }
 
+  // Always let Google decide the prompt rather than forcing 'consent' —
+  // once you've approved this app once, Google will typically reissue a
+  // token with a fast account-chooser tap (or nothing at all) instead of
+  // the full "review permissions" screen every single time.
   function connectDrive() {
     if (NEEDS_SETUP) {
       $('setup-note').style.display = 'block';
       return;
     }
     if (!tokenClient) { showToast('Still loading Google sign-in — try again in a moment.'); return; }
-    tokenClient.requestAccessToken({ prompt: hasValidToken() ? '' : 'consent' });
+    tokenClient.requestAccessToken({ prompt: '' });
   }
 
   function disconnectDrive() {
     accessToken = null;
     tokenExpiry = 0;
-    sessionStorage.removeItem('panelsAccessToken');
-    sessionStorage.removeItem('panelsTokenExpiry');
+    localStorage.removeItem('panelsAccessToken');
+    localStorage.removeItem('panelsTokenExpiry');
     showView('connect');
   }
 
@@ -785,6 +803,7 @@
     loadNextUpShelf();
     loadFavoritesShelf();
     loadContinueReading();
+    loadOfflineShelf();
     loadCurrentFolder();
   }
 
@@ -1050,6 +1069,7 @@
     const cover = !isFolder && coverUrl(p);
     const isFavorite = isFolder ? favoriteFolderIds.has(item.id) : !!(p && p['Favorite']);
     const isFinished = !isFolder && !!(p && p['Finished']);
+    const isPinned = !isFolder && !!(findCachedComicMeta(item.id) && findCachedComicMeta(item.id).pinned);
     if (isFinished) row.classList.add('row-finished');
     row.innerHTML = `
       <div class="icon">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />` : (isFolder ? '📁' : '📕')}</div>
@@ -1065,6 +1085,7 @@
       <a class="row-search hidden" href="${escapeHtml(lcgSearchUrl(item.name))}" target="_blank" rel="noopener" aria-label="Search on League of Comic Geeks">🔍</a>
       ${isFolder ? '' : `<button class="row-read hidden ${isFinished ? 'active' : ''}" aria-label="${isFinished ? 'Mark as unread' : 'Mark as read'}">${isFinished ? '✓' : '○'}</button>`}
       ${isFolder ? '' : `<button class="row-order hidden" aria-label="Add to reading order">📑</button>`}
+      ${isFolder ? '' : `<button class="row-download hidden ${isPinned ? 'active' : ''}" aria-label="${isPinned ? 'Remove from offline downloads' : 'Download for offline'}">${isPinned ? '✓' : '⬇'}</button>`}
       <button class="row-star hidden ${isFavorite ? 'active' : ''}" aria-label="Favorite">${isFavorite ? '★' : '☆'}</button>
     `;
     row.addEventListener('click', () => {
@@ -1085,6 +1106,10 @@
       row.querySelector('.row-order').addEventListener('click', (e) => {
         e.stopPropagation();
         openOrderModal(item);
+      });
+      row.querySelector('.row-download').addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleOfflineDownload(item, e.currentTarget, progressMap);
       });
     }
     row.querySelector('.row-menu').addEventListener('click', (e) => {
@@ -1113,9 +1138,13 @@
       $('ra-read').textContent = isFinished ? '○ Mark as unread' : '✓ Mark as read';
       $('ra-read').classList.remove('hidden');
       $('ra-order').classList.remove('hidden');
+      const isPinned = row.querySelector('.row-download').classList.contains('active');
+      $('ra-download').textContent = isPinned ? '✓ Remove offline download' : '⬇ Download for offline';
+      $('ra-download').classList.remove('hidden');
     } else {
       $('ra-read').classList.add('hidden');
       $('ra-order').classList.add('hidden');
+      $('ra-download').classList.add('hidden');
     }
 
     $('ra-search').href = lcgSearchUrl(item.name);
@@ -1361,14 +1390,16 @@
       if (await hasCachedComic(meta.id)) present.push(meta);
     }
     present.sort((a, b) => b.lastAccessedAt - a.lastAccessedAt);
-    countEl.textContent = '(' + present.length + ' / ' + MAX_OFFLINE_SLOTS + ' slots used)';
+    const pinnedCount = present.filter((m) => m.pinned).length;
+    const autoCount = present.length - pinnedCount;
+    countEl.textContent = '(' + pinnedCount + ' / ' + MAX_PINNED_DOWNLOADS + ' downloaded, ' + autoCount + ' / ' + MAX_OFFLINE_SLOTS + ' from reading)';
     if (present.length === 0) {
       listEl.innerHTML = '<div class="modal-empty">Nothing cached for offline reading yet.</div>';
       return;
     }
     listEl.innerHTML = present.map((meta) => `
       <div class="cache-item" data-drive-id="${escapeHtml(meta.id)}">
-        <div class="name">${escapeHtml(stripExt(meta.name))}</div>
+        <div class="name">${meta.pinned ? '📌 ' : ''}${escapeHtml(stripExt(meta.name))}</div>
         <div class="meta">${meta.lastPage || 0} / ${meta.totalPages || '?'}</div>
         <button class="cache-item-remove" aria-label="Remove from offline cache">✕</button>
       </div>
@@ -1378,6 +1409,7 @@
         const id = e.currentTarget.closest('.cache-item').getAttribute('data-drive-id');
         await clearCachedComic(id);
         renderSettingsCache();
+        loadOfflineShelf();
       });
     });
   }
@@ -1702,6 +1734,45 @@
     } catch (e) {
       renderShelfError(wrap, loadFavoritesShelf);
     }
+  }
+
+  // Comics deliberately downloaded via toggleOfflineDownload (pinned),
+  // not the incidental cache that just follows from reading online —
+  // a dedicated spot for "a few things to read on the train," separate
+  // from Settings' full technical cache listing. Purely local (no
+  // Worker call), so it works with no connection at all.
+  async function loadOfflineShelf() {
+    const wrap = $('offline-shelf-wrap');
+    const list = loadCachedComics().filter((c) => c.pinned);
+    const present = [];
+    for (const meta of list) {
+      if (await hasCachedComic(meta.id)) present.push(meta);
+    }
+    present.sort((a, b) => b.lastAccessedAt - a.lastAccessedAt);
+    if (present.length === 0) {
+      wrap.innerHTML = '<div class="shelf-title">Downloaded for offline</div>'
+        + '<div class="shelf-empty-hint">Nothing downloaded yet — use a comic\'s ⋯ menu to save it for offline reading.</div>';
+      return;
+    }
+    let html = '<div class="shelf-title">Downloaded for offline</div><div class="shelf">';
+    for (const meta of present) {
+      const cover = await getLocalCoverUrl(meta.id);
+      const pct = meta.totalPages ? Math.min(100, Math.round(100 * (meta.lastPage || 0) / meta.totalPages)) : 0;
+      html += `
+        <div class="shelf-card" data-drive-id="${escapeHtml(meta.id)}">
+          <div class="shelf-cover">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />` : '📕'}</div>
+          <div class="shelf-card-body">
+            ${cover ? '' : `<div class="name">${escapeHtml(stripExt(meta.name))}</div>`}
+            <div class="meta">${meta.lastPage || 0} / ${meta.totalPages || '?'}</div>
+            <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
+          </div>
+        </div>`;
+    }
+    html += '</div>';
+    wrap.innerHTML = html;
+    wrap.querySelectorAll('.shelf-card').forEach((card) => {
+      card.addEventListener('click', () => openCachedComicOffline(card.getAttribute('data-drive-id')));
+    });
   }
 
   function toggleFavoriteRow(item, btn) {
@@ -2059,14 +2130,19 @@
   // freshly caching a download and when reopening an already-cached
   // comic, so lastAccessedAt always reflects true recency for eviction —
   // re-reading an older cached comic protects it from being evicted.
-  function recordCachedComicAccess(item) {
+  // opts.pinned marks a deliberate offline download (see
+  // toggleOfflineDownload) — it's only ever set to true here, never
+  // cleared, so casually reopening a pinned comic can't accidentally
+  // demote it back into the small auto-eviction pool.
+  function recordCachedComicAccess(item, opts) {
     const list = loadCachedComics();
     const existing = list.find((c) => c.id === item.id);
     if (existing) {
       existing.lastAccessedAt = Date.now();
       existing.name = item.name;
+      if (opts && opts.pinned) existing.pinned = true;
     } else {
-      list.push({ id: item.id, name: item.name, lastPage: 0, totalPages: 0, lastAccessedAt: Date.now() });
+      list.push({ id: item.id, name: item.name, lastPage: 0, totalPages: 0, lastAccessedAt: Date.now(), pinned: !!(opts && opts.pinned) });
     }
     saveCachedComics(list);
   }
@@ -2126,14 +2202,29 @@
     } catch (e) { /* best effort */ }
   }
 
-  // Drops the least-recently-accessed comics (bytes + cover) once there
-  // are more than MAX_OFFLINE_SLOTS cached.
+  // Drops the least-recently-accessed comics (bytes + cover) once either
+  // bucket is over its cap. Pinned downloads (deliberate "read this on
+  // the train" picks) and the plain incidental reading cache are kept
+  // as two independent pools with their own caps, so casually reading a
+  // few other comics online can never evict something you pinned on
+  // purpose — and vice versa, a pile of pinned downloads can't crowd out
+  // the small always-on reading cache.
   async function enforceOfflineSlotCap() {
     const list = loadCachedComics();
-    if (list.length <= MAX_OFFLINE_SLOTS) return;
-    list.sort((a, b) => b.lastAccessedAt - a.lastAccessedAt);
-    const keep = list.slice(0, MAX_OFFLINE_SLOTS);
-    const evict = list.slice(MAX_OFFLINE_SLOTS);
+    const pinned = list.filter((c) => c.pinned);
+    const unpinned = list.filter((c) => !c.pinned);
+    let evict = [];
+    if (unpinned.length > MAX_OFFLINE_SLOTS) {
+      unpinned.sort((a, b) => b.lastAccessedAt - a.lastAccessedAt);
+      evict = evict.concat(unpinned.slice(MAX_OFFLINE_SLOTS));
+    }
+    if (pinned.length > MAX_PINNED_DOWNLOADS) {
+      pinned.sort((a, b) => b.lastAccessedAt - a.lastAccessedAt);
+      evict = evict.concat(pinned.slice(MAX_PINNED_DOWNLOADS));
+    }
+    if (evict.length === 0) return;
+    const evictIds = new Set(evict.map((e) => e.id));
+    const keep = list.filter((c) => !evictIds.has(c.id));
     if ('caches' in window) {
       try {
         const cache = await caches.open(COMIC_CACHE_NAME);
@@ -2154,8 +2245,8 @@
   // time, closing that race without making openComic() wait on it.
   let cacheWriteQueue = Promise.resolve();
 
-  function cacheComicBuffer(item, buffer) {
-    recordCachedComicAccess(item);
+  function cacheComicBuffer(item, buffer, opts) {
+    recordCachedComicAccess(item, opts);
     cacheWriteQueue = cacheWriteQueue.then(() => writeComicBufferToCache(item, buffer));
     return cacheWriteQueue;
   }
@@ -2177,6 +2268,44 @@
       const cache = await caches.open(COMIC_CACHE_NAME);
       await cache.delete(comicCacheKey(driveId));
     } catch (e) { /* best effort */ }
+  }
+
+  // Deliberate "download this for offline" action, distinct from the
+  // incidental caching that happens just from opening a comic online —
+  // see cacheComicBuffer's pinned option. Reads current state straight
+  // off btn.classList at click time (same stale-closure-safe pattern as
+  // the other row toggles), since this button lives in two places (the
+  // row itself and the row actions menu's forwarded click).
+  async function toggleOfflineDownload(item, btn, progressMap) {
+    const isPinned = btn.classList.contains('active');
+    if (isPinned) {
+      await clearCachedComic(item.id);
+      btn.classList.remove('active');
+      btn.textContent = '⬇';
+      btn.setAttribute('aria-label', 'Download for offline');
+      showToast('Removed from offline downloads.');
+      loadOfflineShelf();
+      return;
+    }
+    btn.disabled = true;
+    const prevLabel = btn.textContent;
+    btn.textContent = '…';
+    try {
+      const buffer = await downloadWithProgress(item.id, item.size ? Number(item.size) : null);
+      await cacheComicBuffer(item, buffer, { pinned: true });
+      const existingCover = progressMap && coverUrl(progressMap[item.id]);
+      if (existingCover) cacheCoverFromUrl(item.id, existingCover);
+      btn.classList.add('active');
+      btn.textContent = '✓';
+      btn.setAttribute('aria-label', 'Remove from offline downloads');
+      showToast('Downloaded for offline reading.');
+      loadOfflineShelf();
+    } catch (e) {
+      btn.textContent = prevLabel;
+      showToast('Download failed — try again.');
+    } finally {
+      btn.disabled = false;
+    }
   }
 
   // -------------------------------------------------------------------
@@ -2511,6 +2640,7 @@
     if (hasValidToken()) {
       showView('library');
       loadContinueReading();
+      loadOfflineShelf();
       loadCurrentFolder();
     } else {
       showView('connect');
@@ -2584,6 +2714,7 @@
     loadNextUpShelf();
     loadFavoritesShelf();
     loadContinueReading();
+    loadOfflineShelf();
     loadCurrentFolder();
   });
 
@@ -2623,7 +2754,7 @@
       setTimeout(() => { main.style.transition = ''; }, 200);
       if (pulledEnough && !refreshing) {
         refreshing = true;
-        Promise.all([loadNextUpShelf(), loadFavoritesShelf(), loadContinueReading(), loadCurrentFolder()])
+        Promise.all([loadNextUpShelf(), loadFavoritesShelf(), loadContinueReading(), loadOfflineShelf(), loadCurrentFolder()])
           .finally(() => {
             refreshing = false;
             indicator.style.opacity = '0';
@@ -2702,6 +2833,10 @@
   });
   $('ra-order').addEventListener('click', () => {
     if (rowActionsRow) rowActionsRow.querySelector('.row-order').click();
+    closeRowActionsMenu();
+  });
+  $('ra-download').addEventListener('click', () => {
+    if (rowActionsRow) rowActionsRow.querySelector('.row-download').click();
     closeRowActionsMenu();
   });
   $('ra-search').addEventListener('click', closeRowActionsMenu);
