@@ -350,7 +350,6 @@
   <main class="scroll" id="library-main">
     <div class="streak-goal-card" id="streak-goal-card"></div>
     <div id="nextup-shelf-wrap"></div>
-    <div id="recent-shelf-wrap"></div>
     <div id="favorites-shelf-wrap"></div>
     <div id="continue-shelf-wrap"></div>
     <div id="folder-list"></div>
@@ -649,7 +648,6 @@
     renderBreadcrumb();
     loadReadingLogAndSettings();
     loadNextUpShelf();
-    loadRecentShelf();
     loadFavoritesShelf();
     loadContinueReading();
     loadCurrentFolder();
@@ -689,22 +687,6 @@
     return items.filter(f =>
       f.mimeType === 'application/vnd.google-apps.folder' || isComicFile(f.name)
     );
-  }
-
-  // Comic files across the whole Drive, newest-created first — the "what's
-  // new" view, since a flat folder scroll doesn't surface that on its own.
-  async function listRecentComics(limit) {
-    try {
-      const data = await driveFetch('/files', {
-        q: "mimeType != 'application/vnd.google-apps.folder' and trashed = false",
-        fields: 'files(id,name,mimeType,size,createdTime)',
-        orderBy: 'createdTime desc',
-        pageSize: '50',
-      });
-      return (data.files || []).filter((f) => isComicFile(f.name)).slice(0, limit);
-    } catch (e) {
-      return [];
-    }
   }
 
   // Panels has no real publication-date metadata (Drive's createdTime
@@ -1316,34 +1298,6 @@
       wrap.innerHTML = html;
       wrap.querySelectorAll('.shelf-card').forEach((card) => {
         const idx = Number(card.getAttribute('data-nextup-idx'));
-        card.addEventListener('click', () => openComic(items[idx]));
-      });
-    } catch (e) {
-      wrap.innerHTML = '';
-    }
-  }
-
-  async function loadRecentShelf() {
-    const wrap = $('recent-shelf-wrap');
-    try {
-      const items = await listRecentComics(10);
-      if (items.length === 0) { wrap.innerHTML = ''; return; }
-      const progressMap = await fetchProgressMap();
-      let html = '<div class="shelf-title">Recently added</div><div class="shelf">';
-      items.forEach((item, idx) => {
-        const cover = coverUrl(progressMap[item.id]);
-        html += `
-          <div class="shelf-card" data-recent-idx="${idx}">
-            <div class="shelf-cover">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />` : '📕'}</div>
-            <div class="shelf-card-body">
-              ${cover ? '' : `<div class="name">${escapeHtml(stripExt(item.name))}</div>`}
-            </div>
-          </div>`;
-      });
-      html += '</div>';
-      wrap.innerHTML = html;
-      wrap.querySelectorAll('.shelf-card').forEach((card) => {
-        const idx = Number(card.getAttribute('data-recent-idx'));
         card.addEventListener('click', () => openComic(items[idx]));
       });
     } catch (e) {
@@ -2294,7 +2248,6 @@
 
   $('btn-refresh').addEventListener('click', () => {
     loadNextUpShelf();
-    loadRecentShelf();
     loadFavoritesShelf();
     loadContinueReading();
     loadCurrentFolder();
