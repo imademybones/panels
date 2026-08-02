@@ -1204,24 +1204,40 @@
     showToast('Library root reset to My Drive.');
   }
 
+  // Drive query strings have a practical length limit — a wide folder
+  // (Comics roots regularly have hundreds of direct subfolders) blows
+  // past it in a single 'id1 in parents or id2 in parents or ...'
+  // clause, so any OR'd-parents query gets built in bounded chunks and
+  // issued in parallel rather than as one unbounded string.
+  function chunkArray(arr, size) {
+    const chunks = [];
+    for (let i = 0; i < arr.length; i += size) chunks.push(arr.slice(i, i + size));
+    return chunks;
+  }
+
   // Breadth-first walk of every subfolder under rootId, one Drive request
-  // per tree level (an OR'd 'in parents' clause across the whole current
-  // frontier) rather than one request per folder — cheap enough to just
+  // per chunk of the current tree level (rather than one request per
+  // folder, or one unbounded request per level) — cheap enough to just
   // redo whenever the cache is invalidated instead of trying to keep it
   // incrementally in sync with Drive-side changes.
   async function collectFolderIds(rootId) {
     const ids = new Set([rootId]);
     let frontier = [rootId];
     while (frontier.length) {
-      const orClause = frontier.map((id) => `'${id}' in parents`).join(' or ');
-      const data = await driveFetch('/files', {
-        q: `trashed = false and mimeType = 'application/vnd.google-apps.folder' and (${orClause})`,
-        fields: 'files(id)',
-        pageSize: '1000',
-        includeItemsFromAllDrives: 'true',
-      });
-      const nextIds = (data.files || []).map((f) => f.id).filter((id) => !ids.has(id));
-      nextIds.forEach((id) => ids.add(id));
+      const chunks = chunkArray(frontier, 30);
+      const results = await Promise.all(chunks.map((chunk) => {
+        const orClause = chunk.map((id) => `'${id}' in parents`).join(' or ');
+        return driveFetch('/files', {
+          q: `trashed = false and mimeType = 'application/vnd.google-apps.folder' and (${orClause})`,
+          fields: 'files(id)',
+          pageSize: '1000',
+          includeItemsFromAllDrives: 'true',
+        });
+      }));
+      const nextIds = [];
+      results.forEach((data) => (data.files || []).forEach((f) => {
+        if (!ids.has(f.id)) { ids.add(f.id); nextIds.push(f.id); }
+      }));
       frontier = nextIds;
     }
     return ids;
@@ -1232,30 +1248,32 @@
     return libraryFolderIdsCache;
   }
 
-  // Drive query strings have a practical length limit, so a library with
-  // a lot of subfolders gets its 'in parents' clause split across a few
-  // parallel requests instead of one giant query.
-  function chunkArray(arr, size) {
-    const chunks = [];
-    for (let i = 0; i < arr.length; i += size) chunks.push(arr.slice(i, i + size));
-    return chunks;
-  }
-
+  // Fetches broadly with a single ordinary query (so it can never hit the
+  // query-length ceiling itself), then narrows to the library root's
+  // subtree client-side by checking each result's own parents against
+  // the folder-ID set — far simpler and more robust than trying to
+  // encode "any of these hundreds of folders" into the query itself.
   async function driveFetchScopedToLibrary(baseQuery, params) {
     if (!libraryRoot) {
       return driveFetch('/files', { ...params, q: baseQuery });
     }
-    const folderIds = Array.from(await getLibraryFolderIds());
-    const chunks = chunkArray(folderIds, 80);
-    const results = await Promise.all(chunks.map((chunk) => {
-      const parentClause = chunk.map((id) => `'${id}' in parents`).join(' or ');
-      return driveFetch('/files', { ...params, q: `${baseQuery} and (${parentClause})` });
-    }));
-    const seen = new Set();
-    const files = [];
-    results.forEach((r) => (r.files || []).forEach((f) => {
-      if (!seen.has(f.id)) { seen.add(f.id); files.push(f); }
-    }));
+    let folderIds;
+    try {
+      folderIds = await getLibraryFolderIds();
+    } catch (e) {
+      // Best effort — if the folder crawl itself fails for some reason,
+      // fall back to unscoped rather than breaking the caller entirely.
+      return driveFetch('/files', { ...params, q: baseQuery });
+    }
+    const fields = params.fields.includes('parents')
+      ? params.fields
+      : params.fields.replace('files(', 'files(parents,');
+    // Pulls the largest single page Drive allows rather than whatever
+    // the caller asked for — since filtering to the library subtree
+    // happens after the fetch, a small page could get crowded out
+    // entirely by unrelated recent files elsewhere in the Drive.
+    const data = await driveFetch('/files', { ...params, fields, q: baseQuery, pageSize: '1000' });
+    const files = (data.files || []).filter((f) => (f.parents || []).some((p) => folderIds.has(p)));
     return { files };
   }
 
