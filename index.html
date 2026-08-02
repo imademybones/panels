@@ -50,6 +50,7 @@
     padding:14px 26px;font-size:15px;font-weight:700;cursor:pointer;
     transition:transform .15s ease, opacity .15s ease;
   }
+  .btn-danger{background:var(--accent);}
   .btn:active{transform:scale(0.96);}
   .btn-outline{background:transparent;color:var(--ink);border:1.5px solid var(--border);}
   .setup-note{
@@ -98,6 +99,9 @@
   .settings-section{margin-top:18px;}
   .settings-section:first-child{margin-top:6px;}
   .settings-label{font-size:13px;font-weight:700;margin-bottom:10px;}
+  .settings-label-row{display:flex;align-items:center;justify-content:space-between;gap:8px;}
+  .settings-label-row .settings-label{margin-bottom:10px;}
+  .link-btn-danger{color:var(--accent);}
   .settings-label span{font-weight:500;color:var(--muted);}
   .cache-item{
     display:flex;align-items:center;gap:10px;padding:11px 4px;
@@ -137,8 +141,12 @@
   }
   .list-controls{display:flex;align-items:center;gap:8px;}
   .sort-select{
-    background:var(--surface);border:1px solid var(--border);border-radius:8px;
-    padding:5px 8px;font-size:12.5px;font-family:inherit;color:var(--ink);
+    -webkit-appearance:none;-moz-appearance:none;appearance:none;
+    background:var(--surface) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%238a8375' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>") no-repeat right 9px center;
+    background-size:9px 6px;
+    border:1px solid var(--border);border-radius:8px;
+    padding:5px 24px 5px 9px;font-size:12.5px;font-weight:600;font-family:inherit;color:var(--ink);
+    cursor:pointer;
   }
   .filter-chip{
     background:var(--surface);border:1px solid var(--border);border-radius:8px;
@@ -162,6 +170,10 @@
   }
   .pull-indicator.spinning{animation:pull-spin .7s linear infinite;}
   @keyframes pull-spin{to{transform:translateX(-50%) rotate(360deg);}}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  .btn-refresh-icon{display:inline-block;}
+  .btn-refresh-icon.spinning{animation:spin .7s linear infinite;}
+  #btn-refresh:disabled{opacity:.5;cursor:default;}
 
   /* Reading streak + daily goal */
   .streak-goal-card{
@@ -287,6 +299,7 @@
     font-size:10px;font-weight:800;letter-spacing:.03em;color:var(--accent);
     background:var(--accent-soft);padding:1px 6px;border-radius:5px;
   }
+  .status-badge{font-size:11px;line-height:1;}
   .empty-state, .loading-state{color:var(--muted);font-size:14px;text-align:center;padding:40px 20px;}
   .shelf-error{font-size:12.5px;color:var(--muted);padding:10px 2px;}
   .shelf-error .link-btn{padding:0;font-size:12.5px;text-decoration:underline;}
@@ -298,17 +311,18 @@
   }
   .reader-stage{
     flex:1;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;
+    touch-action:none;
   }
   .reader-stage img{
-    max-width:100%;max-height:100%;object-fit:contain;opacity:0;transition:opacity .16s ease;
+    max-width:100%;max-height:100%;object-fit:contain;opacity:0;
+    transition:opacity .16s ease, transform .18s ease;touch-action:none;
   }
   .reader-stage img.page-visible{
     opacity:1;
   }
-  .reader-stage img.zoomed{
-    max-width:none;max-height:none;width:auto;height:auto;
+  .reader-stage img.zooming{
+    transition:opacity .16s ease;
   }
-  .reader-stage.zoom-mode{overflow:auto;align-items:flex-start;justify-content:flex-start;}
   .tap-zone{position:absolute;top:0;bottom:0;width:34%;}
   .tap-zone.left{left:0;}
   .tap-zone.right{right:0;}
@@ -336,6 +350,16 @@
     background:rgba(255,255,255,.3);border-radius:2px;outline:none;}
   .scrubber::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;
     border-radius:50%;background:#fff;}
+  .scrub-preview{
+    position:absolute;bottom:100%;margin-bottom:12px;width:90px;height:120px;
+    border-radius:8px;overflow:hidden;background:#000;border:2px solid #fff;
+    box-shadow:0 4px 16px rgba(0,0,0,.45);pointer-events:none;
+  }
+  .scrub-preview img{width:100%;height:100%;object-fit:contain;background:#111;display:block;}
+  .scrub-preview-page{
+    position:absolute;bottom:0;left:0;right:0;text-align:center;
+    font-size:11px;font-weight:700;color:#fff;background:rgba(0,0,0,.6);padding:3px 0;
+  }
 
   .load-overlay{
     position:absolute;inset:0;background:#000;display:flex;flex-direction:column;
@@ -349,11 +373,17 @@
   /* Toast */
   #toast{
     position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(20px);
-    background:var(--ink);color:#fff;padding:11px 18px;border-radius:999px;
+    background:var(--ink);color:#fff;padding:11px 18px;border-radius:22px;
     font-size:13.5px;font-weight:600;opacity:0;pointer-events:none;transition:all .25s ease;
     z-index:100;max-width:85vw;text-align:center;
+    display:flex;flex-direction:column;align-items:center;gap:7px;
   }
-  #toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0);pointer-events:auto;}
+  .toast-action{
+    background:rgba(255,255,255,.15);border:none;border-radius:999px;color:#fff;
+    font-size:12.5px;font-weight:700;padding:6px 13px;cursor:pointer;
+  }
+  .toast-action:active{background:rgba(255,255,255,.28);}
 
   /* Add to reading order modal */
   .modal-overlay{
@@ -418,7 +448,7 @@
     <input type="search" class="search-input" id="search-input" placeholder="Search your library…" />
   </div>
   <div class="refresh-row">
-    <button class="link-btn" id="btn-refresh">↻ Refresh</button>
+    <button class="link-btn" id="btn-refresh"><span class="btn-refresh-icon" id="btn-refresh-icon">↻</span> Refresh</button>
     <div class="list-controls">
       <select class="sort-select" id="sort-select">
         <option value="name">Name</option>
@@ -478,10 +508,23 @@
       </div>
     </div>
     <div class="settings-section">
-      <div class="settings-label">Offline cache <span id="settings-cache-count"></span></div>
+      <div class="settings-label-row">
+        <div class="settings-label">Offline cache <span id="settings-cache-count"></span></div>
+        <button class="link-btn link-btn-danger hidden" id="btn-clear-all-cache">Clear all</button>
+      </div>
       <div id="settings-cache-list"></div>
     </div>
   </main>
+</div>
+
+<!-- ================= CLEAR CACHE CONFIRM MODAL ================= -->
+<div id="clear-cache-modal" class="modal-overlay hidden">
+  <div class="modal-card">
+    <div class="modal-title">Clear all downloads?</div>
+    <p class="modal-desc">This removes every comic cached for offline reading — both deliberate downloads and the automatic reading cache. You can always re-download or reopen them later while connected.</p>
+    <button class="btn btn-danger" id="btn-confirm-clear-cache">Clear all</button>
+    <button class="link-btn" id="btn-cancel-clear-cache">Cancel</button>
+  </div>
 </div>
 
 <!-- ================= READER SCREEN ================= -->
@@ -498,6 +541,10 @@
       <div class="reader-count" id="reader-count"></div>
     </div>
     <div class="reader-bar bottom" id="bar-bottom">
+      <div class="scrub-preview hidden" id="scrub-preview">
+        <img id="scrub-preview-img" alt="" />
+        <div class="scrub-preview-page" id="scrub-preview-page"></div>
+      </div>
       <input type="range" class="scrubber" id="scrubber" min="0" max="0" value="0" />
     </div>
 
@@ -524,24 +571,12 @@
   </div>
 </div>
 
-<!-- ================= DAILY GOAL MODAL ================= -->
-<div id="goal-modal" class="modal-overlay hidden">
-  <div class="modal-card">
-    <div class="modal-title">Daily reading goal</div>
-    <div class="modal-new-row">
-      <input type="number" id="goal-input" min="1" inputmode="numeric" />
-      <button class="btn btn-outline" id="btn-save-goal">Save</button>
-    </div>
-    <button class="link-btn" id="btn-cancel-goal-modal">Cancel</button>
-  </div>
-</div>
-
 <!-- ================= DISCONNECT CONFIRM MODAL ================= -->
 <div id="disconnect-modal" class="modal-overlay hidden">
   <div class="modal-card">
     <div class="modal-title">Disconnect Google Drive?</div>
     <p class="modal-desc">You'll need to reconnect to browse or download new comics. Anything already cached offline stays available.</p>
-    <button class="btn" id="btn-confirm-disconnect">Disconnect</button>
+    <button class="btn btn-danger" id="btn-confirm-disconnect">Disconnect</button>
     <button class="link-btn" id="btn-cancel-disconnect-modal">Cancel</button>
   </div>
 </div>
@@ -551,7 +586,6 @@
   <div class="modal-card">
     <div class="modal-title" id="row-actions-title"></div>
     <div class="modal-list">
-      <button class="modal-list-item row-action-item" id="ra-favorite"></button>
       <button class="modal-list-item row-action-item" id="ra-read"></button>
       <button class="modal-list-item row-action-item" id="ra-order">📑 Add to reading order</button>
       <button class="modal-list-item row-action-item" id="ra-download"></button>
@@ -642,6 +676,31 @@
     el.classList.add('show');
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => el.classList.remove('show'), 3200);
+  }
+
+  // Finish-comic toast, optionally with a "Read next" action when the
+  // comic that just finished came from a folder listing or reading
+  // order with something after it (see readNextContext) — keeps binge
+  // reading a single tap instead of dropping straight back to the
+  // library every time.
+  function showFinishToast(finishedName, nextItem, nextContext) {
+    const el = $('toast');
+    clearTimeout(toastTimer);
+    if (nextItem) {
+      el.innerHTML = '🎉 Finished ' + escapeHtml(finishedName) + '!'
+        + '<button class="toast-action" id="toast-read-next">Read next: ' + escapeHtml(stripExt(nextItem.name)) + ' →</button>';
+      $('toast-read-next').addEventListener('click', () => {
+        el.classList.remove('show');
+        readNextContext = nextContext;
+        openComic(nextItem);
+      });
+      el.classList.add('show');
+      toastTimer = setTimeout(() => el.classList.remove('show'), 5000);
+    } else {
+      el.textContent = '🎉 Finished ' + finishedName + '!';
+      el.classList.add('show');
+      toastTimer = setTimeout(() => el.classList.remove('show'), 3200);
+    }
   }
 
   function stripExt(name) {
@@ -775,7 +834,7 @@
     }
     shelfEl.innerHTML = html;
     shelfEl.querySelectorAll('.shelf-card').forEach((card) => {
-      card.addEventListener('click', () => openCachedComicOffline(card.getAttribute('data-drive-id')));
+      card.addEventListener('click', () => { readNextContext = null; openCachedComicOffline(card.getAttribute('data-drive-id')); });
     });
     wrap.style.display = 'block';
   }
@@ -1077,20 +1136,24 @@
         <div class="name">${escapeHtml(isFolder ? item.name : stripExt(item.name))}</div>
         <div class="meta">
           ${isFolder ? '' : `<span class="badge">${formatOf(item.name)}</span>`}
+          ${isFavorite ? '<span class="status-badge" title="Favorite">★</span>' : ''}
+          ${isPinned ? '<span class="status-badge" title="Downloaded for offline">📌</span>' : ''}
           ${p ? `<span>${p['Last Page'] || 0} / ${p['Total Pages'] || '?'} pages</span>` : ''}
         </div>
         ${p && p['Total Pages'] ? `<div class="progress-track"><div class="progress-fill" style="width:${Math.min(100, Math.round(100 * (p['Last Page'] || 0) / p['Total Pages']))}%"></div></div>` : ''}
       </div>
+      <button class="row-star ${isFavorite ? 'active' : ''}" aria-label="${isFavorite ? 'Remove favorite' : 'Favorite'}">${isFavorite ? '★' : '☆'}</button>
       <button class="row-menu" aria-label="More actions">⋯</button>
       <a class="row-search hidden" href="${escapeHtml(lcgSearchUrl(item.name))}" target="_blank" rel="noopener" aria-label="Search on League of Comic Geeks">🔍</a>
       ${isFolder ? '' : `<button class="row-read hidden ${isFinished ? 'active' : ''}" aria-label="${isFinished ? 'Mark as unread' : 'Mark as read'}">${isFinished ? '✓' : '○'}</button>`}
       ${isFolder ? '' : `<button class="row-order hidden" aria-label="Add to reading order">📑</button>`}
       ${isFolder ? '' : `<button class="row-download hidden ${isPinned ? 'active' : ''}" aria-label="${isPinned ? 'Remove from offline downloads' : 'Download for offline'}">${isPinned ? '✓' : '⬇'}</button>`}
-      <button class="row-star hidden ${isFavorite ? 'active' : ''}" aria-label="Favorite">${isFavorite ? '★' : '☆'}</button>
     `;
     row.addEventListener('click', () => {
-      if (isFolder) openFolderFn(item.id, item.name);
-      else openComic(item);
+      if (isFolder) { openFolderFn(item.id, item.name); return; }
+      const idx = visibleComicSequence.findIndex((it) => it.id === item.id);
+      readNextContext = idx >= 0 ? { items: visibleComicSequence, index: idx } : null;
+      openComic(item);
     });
     row.querySelector('.row-star').addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1129,9 +1192,6 @@
     rowActionsRow = row;
     $('row-actions-title').textContent = isFolder ? item.name : stripExt(item.name);
 
-    const isFavorite = row.querySelector('.row-star').classList.contains('active');
-    $('ra-favorite').textContent = isFavorite ? '★ Remove favorite' : '☆ Add favorite';
-
     const rowRead = row.querySelector('.row-read');
     if (rowRead) {
       const isFinished = rowRead.classList.contains('active');
@@ -1167,6 +1227,13 @@
   let listFavoritesOnly = localStorage.getItem('panelsListFavoritesOnly') === '1';
   let lastListState = null; // { items, progressMap, favoriteFolderIds, openFolderFn, emptyMessage }
 
+  // Comics currently visible in folder-list, in display order — read
+  // fresh at row-click time (see buildItemRow) rather than captured when
+  // the row was built, so it always reflects whatever sort/filter is
+  // active right now. Powers the "Read next" toast after finishing a
+  // comic opened from a folder listing.
+  let visibleComicSequence = [];
+
   function applySortFilter(items, progressMap, favoriteFolderIds) {
     let result = items;
     if (listFavoritesOnly) {
@@ -1194,6 +1261,7 @@
     const { items, progressMap, favoriteFolderIds, openFolderFn, emptyMessage } = lastListState;
     const list = $('folder-list');
     const filtered = applySortFilter(items, progressMap, favoriteFolderIds);
+    visibleComicSequence = filtered.filter((it) => it.mimeType !== 'application/vnd.google-apps.folder');
     $('az-rail').classList.add('hidden');
     if (filtered.length === 0) {
       list.innerHTML = '<div class="empty-state">' + (listFavoritesOnly ? 'No favorites here.' : escapeHtml(emptyMessage)) + '</div>';
@@ -1336,16 +1404,7 @@
         <div class="goal-progress-track"><div class="goal-progress-fill" style="width:${pct}%"></div></div>
       </div>
     `;
-    $('goal-row').addEventListener('click', openGoalModal);
-  }
-
-  function openGoalModal() {
-    $('goal-input').value = String(dailyGoal);
-    $('goal-modal').classList.remove('hidden');
-  }
-
-  function closeGoalModal() {
-    $('goal-modal').classList.add('hidden');
+    $('goal-row').addEventListener('click', () => showView('settings'));
   }
 
   async function saveGoal(n) {
@@ -1360,13 +1419,6 @@
     } catch (e) { /* best effort */ }
   }
 
-  async function saveGoalFromModal() {
-    const n = parseInt($('goal-input').value, 10);
-    if (!Number.isFinite(n) || n <= 0) { showToast('Enter a positive number of pages.'); return; }
-    closeGoalModal();
-    await saveGoal(n);
-  }
-
   async function saveGoalFromSettings() {
     const n = parseInt($('settings-goal-input').value, 10);
     if (!Number.isFinite(n) || n <= 0) { showToast('Enter a positive number of pages.'); return; }
@@ -1375,10 +1427,11 @@
   }
 
   // ---------------------------------------------------------------------
-  // Settings screen — daily goal (mirrors the streak-card modal) plus
-  // visibility/management of the offline comic cache, which previously
-  // had no UI at all beyond the fixed 3-slot LRU eviction happening
-  // silently in the background.
+  // Settings screen — the single editable home for the daily goal (the
+  // streak card's goal row just links here now, rather than duplicating
+  // its own modal editor) plus visibility/management of the offline
+  // comic cache, which previously had no UI at all beyond the fixed
+  // 3-slot LRU eviction happening silently in the background.
   // ---------------------------------------------------------------------
   async function renderSettingsCache() {
     const listEl = $('settings-cache-list');
@@ -1393,6 +1446,7 @@
     const pinnedCount = present.filter((m) => m.pinned).length;
     const autoCount = present.length - pinnedCount;
     countEl.textContent = '(' + pinnedCount + ' / ' + MAX_PINNED_DOWNLOADS + ' downloaded, ' + autoCount + ' / ' + MAX_OFFLINE_SLOTS + ' from reading)';
+    $('btn-clear-all-cache').classList.toggle('hidden', present.length === 0);
     if (present.length === 0) {
       listEl.innerHTML = '<div class="modal-empty">Nothing cached for offline reading yet.</div>';
       return;
@@ -1412,6 +1466,14 @@
         loadOfflineShelf();
       });
     });
+  }
+
+  async function clearAllCachedComics() {
+    const list = loadCachedComics();
+    await Promise.all(list.map((c) => clearCachedComic(c.id)));
+    renderSettingsCache();
+    loadOfflineShelf();
+    showToast('Offline downloads cleared.');
   }
 
   function renderSettings() {
@@ -1609,6 +1671,7 @@
           const id = card.getAttribute('data-drive-id');
           try {
             const meta = await driveFetch('/files/' + id, { fields: 'id,name,mimeType,size' });
+            readNextContext = null;
             openComic(meta);
           } catch (e) {
             showToast('Couldn\'t find that file anymore — it may have moved in Drive.');
@@ -1667,7 +1730,7 @@
       wrap.innerHTML = html;
       wrap.querySelectorAll('.shelf-card').forEach((card) => {
         const idx = Number(card.getAttribute('data-nextup-idx'));
-        card.addEventListener('click', () => openComic(items[idx]));
+        card.addEventListener('click', () => { readNextContext = null; openComic(items[idx]); });
       });
     } catch (e) {
       renderShelfError(wrap, loadNextUpShelf);
@@ -1715,6 +1778,7 @@
           }
           try {
             const meta = await driveFetch('/files/' + id, { fields: 'id,name,mimeType,size' });
+            readNextContext = null;
             openComic(meta);
           } catch (e) {
             showToast('Couldn\'t find that file anymore — it may have moved in Drive.');
@@ -1771,7 +1835,7 @@
     html += '</div>';
     wrap.innerHTML = html;
     wrap.querySelectorAll('.shelf-card').forEach((card) => {
-      card.addEventListener('click', () => openCachedComicOffline(card.getAttribute('data-drive-id')));
+      card.addEventListener('click', () => { readNextContext = null; openCachedComicOffline(card.getAttribute('data-drive-id')); });
     });
   }
 
@@ -1960,6 +2024,10 @@
           <button class="row-order-remove" aria-label="Remove from order">✕</button>
         `;
         row.addEventListener('click', () => {
+          readNextContext = {
+            items: entries.map((e) => ({ id: e.fields['Drive File ID'], name: e.fields['Title'] })),
+            index: idx,
+          };
           openComic({ id: f['Drive File ID'], name: f['Title'] });
         });
         row.querySelector('.row-order-remove').addEventListener('click', (e) => {
@@ -2079,8 +2147,19 @@
   let currentComic = null; // { id, name }
   let barsVisible = true;
   let barsTimer = null;
-  let zoomed = false;
   let saveDebounce = null;
+  // Continuous pinch-to-zoom state, applied as a single CSS transform
+  // (translate then scale) on #reader-img — replaces the old fixed
+  // double-tap toggle. zoomScale === 1 means "not zoomed" throughout
+  // the reader's tap/swipe logic below.
+  let zoomScale = 1, zoomX = 0, zoomY = 0;
+  const MIN_ZOOM = 1, MAX_ZOOM = 4;
+  // Set right before openComic()/openCachedComicOffline() whenever the
+  // comic came from a meaningful ordered sequence (folder listing or a
+  // reading order) — { items: [{id,name,...}], index }. Powers the
+  // "Read next" action in the finish toast; left null for shelf cards
+  // and other one-off entry points where "next" wouldn't mean anything.
+  let readNextContext = null;
 
   // -------------------------------------------------------------------
   // Local comic cache — keeps the raw bytes of up to MAX_OFFLINE_SLOTS
@@ -2389,8 +2468,7 @@
     currentComic = item;
     pageIndex = 0;
     pages = [];
-    zoomed = false;
-    $('reader-stage').classList.remove('zoom-mode');
+    resetZoom(false);
     $('load-overlay').classList.remove('hidden');
     setLoadProgress(0, 'Downloading…');
 
@@ -2488,8 +2566,7 @@
     currentComic = { id: meta.id, name: meta.name };
     pageIndex = 0;
     pages = [];
-    zoomed = false;
-    $('reader-stage').classList.remove('zoom-mode');
+    resetZoom(false);
     $('load-overlay').classList.remove('hidden');
     setLoadProgress(60, 'Unpacking pages…');
 
@@ -2544,9 +2621,9 @@
 
   function renderPage() {
     const img = $('reader-img');
+    resetZoom(false);
     img.classList.remove('page-visible');
     img.src = pages[pageIndex].url;
-    img.classList.toggle('zoomed', zoomed);
     requestAnimationFrame(() => requestAnimationFrame(() => img.classList.add('page-visible')));
     $('reader-count').textContent = (pageIndex + 1) + ' / ' + pages.length;
     $('scrubber').value = String(pageIndex);
@@ -2578,6 +2655,28 @@
     if (i < 0 || i >= pages.length) return;
     pageIndex = i;
     renderPage();
+  }
+
+  // Floating page thumbnail shown above the scrubber while dragging —
+  // pages are already extracted to local object URLs, so this is free
+  // (no network/decoding cost beyond swapping an <img> src).
+  function updateScrubPreview(i) {
+    if (!pages[i]) return;
+    const preview = $('scrub-preview');
+    $('scrub-preview-img').src = pages[i].url;
+    $('scrub-preview-page').textContent = (i + 1) + ' / ' + pages.length;
+    const track = $('scrubber').getBoundingClientRect();
+    const bar = $('bar-bottom').getBoundingClientRect();
+    const ratio = pages.length > 1 ? i / (pages.length - 1) : 0;
+    const thumbX = track.left + ratio * track.width;
+    let left = (thumbX - bar.left) - 45;
+    left = Math.max(6, Math.min(bar.width - 96, left));
+    preview.style.left = left + 'px';
+    preview.classList.remove('hidden');
+  }
+
+  function hideScrubPreview() {
+    $('scrub-preview').classList.add('hidden');
   }
 
   function nextPage() { goToPage(pageIndex + 1); }
@@ -2628,7 +2727,12 @@
         'Finished': true,
         'Finished Date': todayISO(),
       });
-      showToast('🎉 Finished ' + stripExt(currentComic.name) + '!');
+      let nextItem = null, nextContext = null;
+      if (readNextContext && readNextContext.index >= 0 && readNextContext.index + 1 < readNextContext.items.length) {
+        nextItem = readNextContext.items[readNextContext.index + 1];
+        nextContext = { items: readNextContext.items, index: readNextContext.index + 1 };
+      }
+      showFinishToast(stripExt(currentComic.name), nextItem, nextContext);
     }
     pages.forEach(p => URL.revokeObjectURL(p.url));
     pages = [];
@@ -2647,33 +2751,123 @@
     }
   }
 
-  // Tap zones
-  $('tap-left').addEventListener('click', () => { if (!zoomed) prevPage(); });
-  $('tap-right').addEventListener('click', () => { if (!zoomed) nextPage(); });
-  $('reader-img').addEventListener('click', () => { if (!zoomed) toggleBars(); });
+  // ---------------------------------------------------------------------
+  // Zoom — continuous pinch-to-zoom with focal-point anchoring, plus a
+  // single-finger drag to pan once zoomed and a double-tap shortcut into
+  // a fixed 2.5x level. All three read/write the same zoomScale/zoomX/
+  // zoomY state and go through applyZoomTransform() so they compose
+  // cleanly (e.g. pinching further in while already double-tap-zoomed).
+  // ---------------------------------------------------------------------
+  function applyZoomTransform(animate) {
+    const img = $('reader-img');
+    img.classList.toggle('zooming', !animate);
+    img.style.transform = 'translate(' + zoomX + 'px, ' + zoomY + 'px) scale(' + zoomScale + ')';
+  }
 
-  // Double-tap to zoom
+  function clampPan() {
+    const rect = $('reader-stage').getBoundingClientRect();
+    const maxX = Math.max(0, (rect.width * (zoomScale - 1)) / 2);
+    const maxY = Math.max(0, (rect.height * (zoomScale - 1)) / 2);
+    zoomX = Math.max(-maxX, Math.min(maxX, zoomX));
+    zoomY = Math.max(-maxY, Math.min(maxY, zoomY));
+  }
+
+  function resetZoom(animate) {
+    zoomScale = 1; zoomX = 0; zoomY = 0;
+    applyZoomTransform(animate !== false);
+  }
+
+  function distanceBetween(t0, t1) {
+    return Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+  }
+
+  // Tap zones
+  $('tap-left').addEventListener('click', () => { if (zoomScale === 1) prevPage(); });
+  $('tap-right').addEventListener('click', () => { if (zoomScale === 1) nextPage(); });
+  $('reader-img').addEventListener('click', () => { if (zoomScale === 1) toggleBars(); });
+
+  // Double-tap: quick shortcut into/out of a fixed 2.5x zoom, centered
+  // on the tapped point.
   let lastTap = 0;
-  $('reader-img').addEventListener('touchend', () => {
+  $('reader-img').addEventListener('touchend', (e) => {
+    if (pinching || panning) return;
     const now = Date.now();
-    if (now - lastTap < 300) {
-      zoomed = !zoomed;
-      $('reader-stage').classList.toggle('zoom-mode', zoomed);
-      $('reader-img').classList.toggle('zoomed', zoomed);
+    if (now - lastTap < 300 && e.changedTouches.length) {
+      if (zoomScale > 1) {
+        resetZoom(true);
+      } else {
+        const rect = $('reader-stage').getBoundingClientRect();
+        const touch = e.changedTouches[0];
+        const dx = touch.clientX - (rect.left + rect.width / 2);
+        const dy = touch.clientY - (rect.top + rect.height / 2);
+        zoomScale = 2.5;
+        zoomX = -dx * (zoomScale - 1);
+        zoomY = -dy * (zoomScale - 1);
+        clampPan();
+        applyZoomTransform(true);
+      }
       setBarsVisible(false);
     }
     lastTap = now;
   });
 
-  // Swipe
+  // Swipe (page nav) / pinch (zoom) / single-finger pan (while zoomed) —
+  // all live on the same element, branching on touch count.
   let touchStartX = null, touchStartY = null;
+  let pinching = false, pinchStartDist = 0, pinchStartScale = 1, pinchStartX = 0, pinchStartY = 0, pinchOffsetX = 0, pinchOffsetY = 0;
+  let panning = false, panStartX = 0, panStartY = 0, panOriginX = 0, panOriginY = 0;
+
   $('reader-stage').addEventListener('touchstart', (e) => {
-    if (zoomed) return;
-    touchStartX = e.touches[0].clientX;
-    touchStartY = e.touches[0].clientY;
+    if (e.touches.length === 2) {
+      pinching = true;
+      panning = false;
+      pinchStartDist = distanceBetween(e.touches[0], e.touches[1]);
+      pinchStartScale = zoomScale;
+      pinchStartX = zoomX;
+      pinchStartY = zoomY;
+      const rect = $('reader-stage').getBoundingClientRect();
+      const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+      const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+      pinchOffsetX = midX - (rect.left + rect.width / 2);
+      pinchOffsetY = midY - (rect.top + rect.height / 2);
+    } else if (e.touches.length === 1 && zoomScale > 1) {
+      panning = true;
+      panStartX = e.touches[0].clientX;
+      panStartY = e.touches[0].clientY;
+      panOriginX = zoomX;
+      panOriginY = zoomY;
+    } else if (e.touches.length === 1) {
+      touchStartX = e.touches[0].clientX;
+      touchStartY = e.touches[0].clientY;
+    }
   }, { passive: true });
+
+  $('reader-stage').addEventListener('touchmove', (e) => {
+    if (pinching && e.touches.length === 2) {
+      e.preventDefault();
+      const dist = distanceBetween(e.touches[0], e.touches[1]);
+      const scaleFactor = (dist / pinchStartDist);
+      zoomScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, pinchStartScale * scaleFactor));
+      const appliedFactor = zoomScale / pinchStartScale;
+      zoomX = pinchStartX * appliedFactor - pinchOffsetX * (appliedFactor - 1);
+      zoomY = pinchStartY * appliedFactor - pinchOffsetY * (appliedFactor - 1);
+      clampPan();
+      applyZoomTransform(false);
+    } else if (panning && e.touches.length === 1) {
+      e.preventDefault();
+      zoomX = panOriginX + (e.touches[0].clientX - panStartX);
+      zoomY = panOriginY + (e.touches[0].clientY - panStartY);
+      clampPan();
+      applyZoomTransform(false);
+    }
+  }, { passive: false });
+
   $('reader-stage').addEventListener('touchend', (e) => {
-    if (zoomed || touchStartX === null) return;
+    if (pinching || panning) {
+      if (e.touches.length === 0) { pinching = false; panning = false; }
+      return;
+    }
+    if (touchStartX === null) return;
     const dx = e.changedTouches[0].clientX - touchStartX;
     const dy = e.changedTouches[0].clientY - touchStartY;
     if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) {
@@ -2690,7 +2884,14 @@
     else if (e.key === 'Escape') { closeReader(); }
   });
 
-  $('scrubber').addEventListener('input', (e) => goToPage(Number(e.target.value)));
+  $('scrubber').addEventListener('input', (e) => {
+    const i = Number(e.target.value);
+    goToPage(i);
+    updateScrubPreview(i);
+  });
+  $('scrubber').addEventListener('change', hideScrubPreview);
+  $('scrubber').addEventListener('touchend', hideScrubPreview);
+  $('scrubber').addEventListener('mouseup', hideScrubPreview);
   $('btn-close-reader').addEventListener('click', () => closeReader());
 
   // ---------------------------------------------------------------------
@@ -2711,11 +2912,13 @@
   });
 
   $('btn-refresh').addEventListener('click', () => {
-    loadNextUpShelf();
-    loadFavoritesShelf();
-    loadContinueReading();
-    loadOfflineShelf();
-    loadCurrentFolder();
+    $('btn-refresh').disabled = true;
+    $('btn-refresh-icon').classList.add('spinning');
+    Promise.all([loadNextUpShelf(), loadFavoritesShelf(), loadContinueReading(), loadOfflineShelf(), loadCurrentFolder()])
+      .finally(() => {
+        $('btn-refresh').disabled = false;
+        $('btn-refresh-icon').classList.remove('spinning');
+      });
   });
 
   // Pull-to-refresh — a touch gesture on the library scroll view doing
@@ -2796,6 +2999,19 @@
   $('btn-settings').addEventListener('click', () => showView('settings'));
   $('btn-settings-back').addEventListener('click', () => showView('library'));
   $('btn-settings-save-goal').addEventListener('click', saveGoalFromSettings);
+  $('btn-clear-all-cache').addEventListener('click', () => {
+    $('clear-cache-modal').classList.remove('hidden');
+  });
+  $('btn-cancel-clear-cache').addEventListener('click', () => {
+    $('clear-cache-modal').classList.add('hidden');
+  });
+  $('clear-cache-modal').addEventListener('click', (e) => {
+    if (e.target.id === 'clear-cache-modal') $('clear-cache-modal').classList.add('hidden');
+  });
+  $('btn-confirm-clear-cache').addEventListener('click', () => {
+    $('clear-cache-modal').classList.add('hidden');
+    clearAllCachedComics();
+  });
 
   $('btn-orders').addEventListener('click', () => showView('orders'));
   $('btn-orders-back').addEventListener('click', () => {
@@ -2813,19 +3029,9 @@
     addToReadingOrder($('new-order-name').value);
   });
 
-  $('btn-cancel-goal-modal').addEventListener('click', closeGoalModal);
-  $('goal-modal').addEventListener('click', (e) => {
-    if (e.target.id === 'goal-modal') closeGoalModal();
-  });
-  $('btn-save-goal').addEventListener('click', saveGoalFromModal);
-
   $('btn-cancel-row-actions').addEventListener('click', closeRowActionsMenu);
   $('row-actions-modal').addEventListener('click', (e) => {
     if (e.target.id === 'row-actions-modal') closeRowActionsMenu();
-  });
-  $('ra-favorite').addEventListener('click', () => {
-    if (rowActionsRow) rowActionsRow.querySelector('.row-star').click();
-    closeRowActionsMenu();
   });
   $('ra-read').addEventListener('click', () => {
     if (rowActionsRow) rowActionsRow.querySelector('.row-read').click();
