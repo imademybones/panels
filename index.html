@@ -120,6 +120,11 @@
   }
   header.topbar h1{font-size:20px;font-weight:800;margin:0;letter-spacing:-0.02em;}
   header.topbar h1 span{color:var(--accent);}
+  .topbar-title{display:flex;flex-direction:column;gap:1px;min-width:0;}
+  .account-indicator{
+    font-size:10.5px;font-weight:600;color:var(--muted);overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap;max-width:180px;
+  }
   .topbar-actions{display:flex;align-items:center;gap:14px;}
   .link-btn{
     background:none;border:none;color:var(--muted);font-size:13px;font-weight:600;
@@ -153,14 +158,22 @@
     padding:5px 9px;font-size:12.5px;font-weight:600;color:var(--muted);cursor:pointer;
   }
   .filter-chip.active{background:var(--accent);border-color:var(--accent);color:#fff;}
-  .search-row{padding:0 18px 10px;flex-shrink:0;}
+  .search-row{padding:0 18px 10px;flex-shrink:0;position:relative;}
   .search-input{
     width:100%;background:var(--surface);border:1px solid var(--border);
-    border-radius:999px;padding:10px 16px;font-size:14px;color:var(--ink);
+    border-radius:999px;padding:10px 40px 10px 16px;font-size:14px;color:var(--ink);
     font-family:inherit;-webkit-appearance:none;appearance:none;
   }
   .search-input::placeholder{color:var(--muted);}
   .search-input:focus{outline:none;border-color:var(--accent);}
+  .search-input::-webkit-search-cancel-button{display:none;}
+  .search-clear{
+    position:absolute;right:26px;top:50%;transform:translateY(-50%);
+    width:22px;height:22px;border-radius:50%;background:var(--border);
+    border:none;color:var(--muted);font-size:11px;display:flex;
+    align-items:center;justify-content:center;cursor:pointer;padding:0;
+  }
+  .search-clear:active{background:var(--accent-soft);}
 
   main.scroll{flex:1;overflow-y:auto;padding:4px 18px 40px;position:relative;}
   .pull-indicator{
@@ -190,6 +203,16 @@
   .goal-edit-hint{color:var(--muted);font-size:11px;opacity:.7;margin-left:2px;}
   .goal-progress-track{width:76px;height:4px;background:var(--border);border-radius:2px;margin-top:6px;overflow:hidden;}
   .goal-progress-fill{height:100%;background:var(--accent);border-radius:2px;}
+  .goal-edit-row{display:flex;align-items:center;gap:4px;justify-content:flex-end;}
+  .goal-edit-row input{
+    width:52px;background:var(--bg);border:1px solid var(--border);border-radius:6px;
+    padding:5px 6px;font-size:13px;font-family:inherit;text-align:right;color:var(--ink);
+  }
+  .goal-inline-btn{
+    background:none;border:none;font-size:15px;cursor:pointer;padding:4px 5px;
+    color:var(--muted);line-height:1;
+  }
+  .goal-inline-btn.save{color:var(--accent);}
 
   /* Continue reading shelf */
   .shelf-title{font-size:12.5px;font-weight:700;text-transform:uppercase;
@@ -295,6 +318,15 @@
     padding:6px;flex-shrink:0;
   }
   .row-order-remove:active{transform:scale(0.85);}
+  .row-drag-handle{
+    background:none;border:none;font-size:16px;color:var(--muted);cursor:grab;
+    padding:4px 6px;flex-shrink:0;touch-action:none;
+  }
+  #orders-list .row{transition:transform .15s ease;}
+  #orders-list .row.row-dragging{
+    transition:none;position:relative;z-index:5;opacity:.92;
+    box-shadow:0 6px 18px rgba(0,0,0,.15);border-radius:var(--radius-sm);
+  }
   .badge{
     font-size:10px;font-weight:800;letter-spacing:.03em;color:var(--accent);
     background:var(--accent-soft);padding:1px 6px;border-radius:5px;
@@ -323,6 +355,11 @@
   .reader-stage img.zooming{
     transition:opacity .16s ease;
   }
+  .zoom-readout{
+    position:absolute;top:14px;left:50%;transform:translateX(-50%);
+    background:rgba(0,0,0,.6);color:#fff;font-size:12px;font-weight:700;
+    padding:5px 12px;border-radius:999px;z-index:3;pointer-events:none;
+  }
   .tap-zone{position:absolute;top:0;bottom:0;width:34%;}
   .tap-zone.left{left:0;}
   .tap-zone.right{right:0;}
@@ -348,6 +385,7 @@
   }
   .scrubber{-webkit-appearance:none;appearance:none;width:100%;height:3px;
     background:rgba(255,255,255,.3);border-radius:2px;outline:none;}
+  .scrubber::-moz-range-progress{background:var(--accent);height:3px;border-radius:2px;}
   .scrubber::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;
     border-radius:50%;background:#fff;}
   .scrub-preview{
@@ -434,7 +472,10 @@
 <!-- ================= LIBRARY SCREEN ================= -->
 <div id="view-library" class="hidden">
   <header class="topbar">
-    <h1>Panels<span>.</span></h1>
+    <div class="topbar-title">
+      <h1>Panels<span>.</span></h1>
+      <div class="account-indicator" id="account-indicator"></div>
+    </div>
     <div class="topbar-actions">
       <button class="link-btn" id="btn-orders">Orders</button>
       <button class="link-btn" id="btn-stats">Stats</button>
@@ -446,6 +487,7 @@
   <div class="breadcrumb" id="breadcrumb"></div>
   <div class="search-row">
     <input type="search" class="search-input" id="search-input" placeholder="Search your library…" />
+    <button class="search-clear hidden" id="search-clear" aria-label="Clear search">✕</button>
   </div>
   <div class="refresh-row">
     <button class="link-btn" id="btn-refresh"><span class="btn-refresh-icon" id="btn-refresh-icon">↻</span> Refresh</button>
@@ -533,6 +575,7 @@
     <div class="tap-zone left" id="tap-left"></div>
     <div class="tap-zone right" id="tap-right"></div>
     <img id="reader-img" src="" alt="" draggable="false" />
+    <div class="zoom-readout hidden" id="zoom-readout"></div>
 
     <div class="reader-bar top" id="bar-top">
       <button class="reader-close" id="btn-close-reader">✕</button>
@@ -824,7 +867,7 @@
       const pct = meta.totalPages ? Math.min(100, Math.round(100 * (meta.lastPage || 0) / meta.totalPages)) : 0;
       html += `
         <div class="shelf-card" data-drive-id="${escapeHtml(meta.id)}">
-          <div class="shelf-cover">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />` : '📕'}</div>
+          <div class="shelf-cover">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="${escapeHtml(stripExt(meta.name))}" />` : '📕'}</div>
           <div class="shelf-card-body">
             ${cover ? '' : `<div class="name">${escapeHtml(stripExt(meta.name))}</div>`}
             <div class="meta">${meta.lastPage || 0} / ${meta.totalPages || '?'}</div>
@@ -855,15 +898,89 @@
     if (name === 'settings') renderSettings();
   }
 
+  // ---------------------------------------------------------------------
+  // Hardware/gesture back button support. The app never otherwise touches
+  // the History API, so Android's back button (or an edge-swipe-back)
+  // would just exit the installed PWA instead of stepping up a
+  // breadcrumb level or closing the reader.
+  //
+  // Every "deeper" navigation (open folder, open reader, open a
+  // sub-screen, drill into a reading order) calls pushNav() to add one
+  // history entry. Every "back" UI control we already have (breadcrumb
+  // tap, ✕/swipe-down/Escape in the reader, the sub-screens' Back links)
+  // additionally calls popNav(1) so the real browser history stack stays
+  // in sync with how many levels those controls just collapsed — without
+  // that, using the in-app controls would leave stale entries sitting in
+  // history and the hardware back button would eventually do something
+  // that no longer matches what's on screen. ignoreNextPopstate exists
+  // because popNav()'s own history.go() asynchronously fires a popstate
+  // once it resolves, which must NOT re-trigger handleBack() a second
+  // time on top of the direct state change the UI control already made.
+  // ---------------------------------------------------------------------
+  let navPushed = 0;
+  let ignoreNextPopstate = false;
+
+  function pushNav() {
+    navPushed++;
+    history.pushState({ panelsNav: navPushed }, '');
+  }
+
+  function popNav(n) {
+    if (n <= 0 || navPushed <= 0) return;
+    const steps = Math.min(n, navPushed);
+    navPushed -= steps;
+    ignoreNextPopstate = true;
+    history.go(-steps);
+  }
+
+  function handleBack() {
+    if (!$('view-reader').classList.contains('hidden')) {
+      closeReader();
+    } else if (!$('view-settings').classList.contains('hidden')) {
+      showView('library');
+    } else if (!$('view-stats').classList.contains('hidden')) {
+      showView('library');
+    } else if (!$('view-orders').classList.contains('hidden')) {
+      if (currentOrderName) renderOrdersList();
+      else showView('library');
+    } else if (crumbs.length > 1) {
+      crumbs = crumbs.slice(0, -1);
+      saveCrumbs();
+      renderBreadcrumb();
+      loadCurrentFolder();
+    }
+  }
+
+  window.addEventListener('popstate', () => {
+    if (ignoreNextPopstate) { ignoreNextPopstate = false; return; }
+    if (navPushed <= 0) return;
+    navPushed--;
+    handleBack();
+  });
+
   function enterLibrary() {
     showView('library');
     renderBreadcrumb();
     loadReadingLogAndSettings();
+    loadConnectedAccount();
     loadNextUpShelf();
     loadFavoritesShelf();
     loadContinueReading();
     loadOfflineShelf();
     loadCurrentFolder();
+  }
+
+  // Surfaces which Drive account is actually connected — no extra OAuth
+  // scope needed, since Drive's own /about endpoint already returns the
+  // signed-in user under the existing drive.readonly grant.
+  async function loadConnectedAccount() {
+    try {
+      const data = await driveFetch('/about', { fields: 'user' });
+      const user = data.user || {};
+      $('account-indicator').textContent = user.emailAddress || user.displayName || '';
+    } catch (e) {
+      $('account-indicator').textContent = '';
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -1061,6 +1178,7 @@
       const btn = document.createElement('button');
       btn.textContent = c.name;
       btn.addEventListener('click', () => {
+        popNav(crumbs.length - (i + 1));
         crumbs = crumbs.slice(0, i + 1);
         saveCrumbs();
         renderBreadcrumb();
@@ -1071,6 +1189,7 @@
   }
 
   function openFolder(id, name) {
+    pushNav();
     crumbs.push({ id, name });
     saveCrumbs();
     renderBreadcrumb();
@@ -1131,7 +1250,7 @@
     const isPinned = !isFolder && !!(findCachedComicMeta(item.id) && findCachedComicMeta(item.id).pinned);
     if (isFinished) row.classList.add('row-finished');
     row.innerHTML = `
-      <div class="icon">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />` : (isFolder ? '📁' : '📕')}</div>
+      <div class="icon">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="${escapeHtml(stripExt(item.name))}" />` : (isFolder ? '📁' : '📕')}</div>
       <div class="info">
         <div class="name">${escapeHtml(isFolder ? item.name : stripExt(item.name))}</div>
         <div class="meta">
@@ -1404,7 +1523,39 @@
         <div class="goal-progress-track"><div class="goal-progress-fill" style="width:${pct}%"></div></div>
       </div>
     `;
-    $('goal-row').addEventListener('click', () => showView('settings'));
+    $('goal-row').onclick = openInlineGoalEditor;
+  }
+
+  // Lightweight inline editor right on the streak card — a quick
+  // on-the-whim goal tweak shouldn't require leaving whatever folder
+  // you're browsing to get to the full Settings screen. Shares the same
+  // saveGoal() write path as Settings, so there's still one source of
+  // truth for what actually persists the value.
+  function openInlineGoalEditor() {
+    const row = $('goal-row');
+    row.onclick = null;
+    row.innerHTML = `
+      <div class="goal-edit-row">
+        <input type="number" id="goal-inline-input" min="1" inputmode="numeric" value="${dailyGoal}" />
+        <button class="goal-inline-btn save" id="goal-inline-save" aria-label="Save">✓</button>
+        <button class="goal-inline-btn" id="goal-inline-cancel" aria-label="Cancel">✕</button>
+      </div>
+    `;
+    const input = $('goal-inline-input');
+    input.focus();
+    input.select();
+    const commit = () => {
+      const n = parseInt(input.value, 10);
+      if (!Number.isFinite(n) || n <= 0) { showToast('Enter a positive number of pages.'); return; }
+      saveGoal(n);
+    };
+    $('goal-inline-save').addEventListener('click', (e) => { e.stopPropagation(); commit(); });
+    $('goal-inline-cancel').addEventListener('click', (e) => { e.stopPropagation(); renderStreakGoalCard(); });
+    input.addEventListener('click', (e) => e.stopPropagation());
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') commit();
+      else if (e.key === 'Escape') renderStreakGoalCard();
+    });
   }
 
   async function saveGoal(n) {
@@ -1629,7 +1780,13 @@
   // resolveBreadcrumbPath() instead. Used for favorited-folder and
   // search-result taps, whose position relative to the current browsing
   // location isn't known.
+  // Jumping here from search/favorites can land several breadcrumb
+  // levels deep in one shot (resolveBreadcrumbPath), which doesn't map
+  // cleanly onto pushNav()'s one-level-per-step model the way normal
+  // openFolder() drilling does — treated as a single back-step rather
+  // than trying to reconstruct every intermediate ancestor.
   async function openFolderDirect(id, name) {
+    pushNav();
     $('folder-list').innerHTML = '<div class="loading-state">Loading…</div>';
     crumbs = await resolveBreadcrumbPath(id, name);
     saveCrumbs();
@@ -1656,7 +1813,7 @@
         html += `
           <div class="shelf-card" data-drive-id="${escapeHtml(f['Drive File ID'])}">
             <button class="shelf-card-dismiss" aria-label="Remove from Continue reading">✕</button>
-            <div class="shelf-cover">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />` : '📕'}</div>
+            <div class="shelf-cover">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="${escapeHtml(f['Title'] || 'Untitled')}" />` : '📕'}</div>
             <div class="shelf-card-body">
               ${cover ? '' : `<div class="name">${escapeHtml(f['Title'] || 'Untitled')}</div>`}
               <div class="meta">${f['Last Page'] || 0} / ${f['Total Pages'] || '?'}</div>
@@ -1671,7 +1828,10 @@
           const id = card.getAttribute('data-drive-id');
           try {
             const meta = await driveFetch('/files/' + id, { fields: 'id,name,mimeType,size' });
-            readNextContext = null;
+            const idx = records.findIndex((r) => r.fields['Drive File ID'] === id);
+            readNextContext = idx >= 0
+              ? { items: records.map((r) => ({ id: r.fields['Drive File ID'], name: r.fields['Title'] })), index: idx }
+              : null;
             openComic(meta);
           } catch (e) {
             showToast('Couldn\'t find that file anymore — it may have moved in Drive.');
@@ -1719,7 +1879,7 @@
         const badge = formatNextUpBadge(item, progressMap);
         html += `
           <div class="shelf-card" data-nextup-idx="${idx}">
-            <div class="shelf-cover">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />` : '📕'}</div>
+            <div class="shelf-cover">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="${escapeHtml(stripExt(item.name))}" />` : '📕'}</div>
             <div class="shelf-card-body">
               ${cover ? '' : `<div class="name">${escapeHtml(stripExt(item.name))}</div>`}
               ${badge ? `<div class="meta">${escapeHtml(badge)}</div>` : ''}
@@ -1759,7 +1919,7 @@
         html += `
           <div class="shelf-card${it.finished ? ' shelf-card-finished' : ''}" data-drive-id="${escapeHtml(it.id)}" data-type="${it.type}">
             <button class="shelf-card-dismiss" aria-label="Remove from Favorites">★</button>
-            <div class="shelf-cover">${it.cover ? `<img class="cover-thumb" src="${escapeHtml(it.cover)}" alt="" />` : (it.type === 'folder' ? '📁' : '📕')}</div>
+            <div class="shelf-cover">${it.cover ? `<img class="cover-thumb" src="${escapeHtml(it.cover)}" alt="${escapeHtml(it.name)}" />` : (it.type === 'folder' ? '📁' : '📕')}</div>
             <div class="shelf-card-body">
               ${it.cover ? '' : `<div class="name">${escapeHtml(it.name)}</div>`}
             </div>
@@ -1824,7 +1984,7 @@
       const pct = meta.totalPages ? Math.min(100, Math.round(100 * (meta.lastPage || 0) / meta.totalPages)) : 0;
       html += `
         <div class="shelf-card" data-drive-id="${escapeHtml(meta.id)}">
-          <div class="shelf-cover">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />` : '📕'}</div>
+          <div class="shelf-cover">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="${escapeHtml(stripExt(meta.name))}" />` : '📕'}</div>
           <div class="shelf-card-body">
             ${cover ? '' : `<div class="name">${escapeHtml(stripExt(meta.name))}</div>`}
             <div class="meta">${meta.lastPage || 0} / ${meta.totalPages || '?'}</div>
@@ -1985,7 +2145,7 @@
             <div class="meta"><span>${counts[name]} comic${counts[name] === 1 ? '' : 's'}</span></div>
           </div>
         `;
-        row.addEventListener('click', () => renderOrderDetail(name));
+        row.addEventListener('click', () => { pushNav(); renderOrderDetail(name); });
         container.appendChild(row);
       });
     } catch (e) {
@@ -2015,6 +2175,7 @@
         const row = document.createElement('div');
         row.className = 'row';
         row.innerHTML = `
+          <button class="row-drag-handle" aria-label="Drag to reorder">⠿</button>
           <div class="icon">📕</div>
           <div class="info">
             <div class="name">${escapeHtml(stripExt(f['Title'] || 'Untitled'))}</div>
@@ -2043,9 +2204,93 @@
         });
         container.appendChild(row);
       });
+      setupOrderDrag(container, entries, name);
     } catch (e) {
       container.innerHTML = '<div class="empty-state">Couldn\'t load this reading order.</div>';
     }
+  }
+
+  // Drag-and-drop reordering, layered on top of the ↑/↓ buttons rather
+  // than replacing them — a 20-issue crossover event is tedious to
+  // reorder one tap at a time, but the buttons stay for quick single-step
+  // nudges. Only one DOM/array reorder happens, at drop time; while
+  // dragging, sibling rows are just visually nudged out of the way via
+  // transform (based on the computed target index) so nothing has to be
+  // reconciled mid-gesture.
+  function setupOrderDrag(container, entries, orderName) {
+    let drag = null; // { row, fromIndex, targetIndex, startY, rowHeight }
+
+    function rows() { return Array.from(container.querySelectorAll('.row')); }
+
+    function updateGap() {
+      rows().forEach((row, idx) => {
+        if (row === drag.row) return;
+        let offset = 0;
+        if (drag.targetIndex > drag.fromIndex && idx > drag.fromIndex && idx <= drag.targetIndex) offset = -1;
+        else if (drag.targetIndex < drag.fromIndex && idx < drag.fromIndex && idx >= drag.targetIndex) offset = 1;
+        row.style.transform = offset ? 'translateY(' + (offset * drag.rowHeight) + 'px)' : '';
+      });
+    }
+
+    function onMove(e) {
+      if (!drag) return;
+      e.preventDefault();
+      const y = e.touches ? e.touches[0].clientY : e.clientY;
+      const dy = y - drag.startY;
+      drag.row.style.transform = 'translateY(' + dy + 'px)';
+      const shift = Math.round(dy / drag.rowHeight);
+      drag.targetIndex = Math.max(0, Math.min(entries.length - 1, drag.fromIndex + shift));
+      updateGap();
+    }
+
+    async function onEnd() {
+      if (!drag) return;
+      const { row, fromIndex, targetIndex } = drag;
+      document.removeEventListener('touchmove', onMove);
+      document.removeEventListener('touchend', onEnd);
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onEnd);
+      drag = null;
+      row.classList.remove('row-dragging');
+      row.style.transform = '';
+      if (targetIndex === fromIndex) {
+        rows().forEach((r) => { r.style.transform = ''; });
+        return;
+      }
+      const reordered = entries.slice();
+      const [moved] = reordered.splice(fromIndex, 1);
+      reordered.splice(targetIndex, 0, moved);
+      try {
+        await Promise.all(reordered.map((entry, i) => {
+          if ((entry.fields['Position'] || 0) === i) return null;
+          return fetch(WORKER_URL + '/readingorders', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ recordId: entry.id, fields: { 'Position': i } }),
+          });
+        }));
+      } catch (e) { /* best effort */ }
+      renderOrderDetail(orderName);
+    }
+
+    container.querySelectorAll('.row-drag-handle').forEach((handle, idx) => {
+      const start = (e) => {
+        e.stopPropagation();
+        const row = handle.closest('.row');
+        row.classList.add('row-dragging');
+        drag = {
+          row, fromIndex: idx, targetIndex: idx,
+          startY: e.touches ? e.touches[0].clientY : e.clientY,
+          rowHeight: row.offsetHeight,
+        };
+        document.addEventListener('touchmove', onMove, { passive: false });
+        document.addEventListener('touchend', onEnd);
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onEnd);
+      };
+      handle.addEventListener('touchstart', start, { passive: true });
+      handle.addEventListener('mousedown', start);
+    });
   }
 
   async function removeFromOrder(recordId, orderName) {
@@ -2464,6 +2709,7 @@
   }
 
   async function openComic(item) {
+    pushNav();
     showView('reader');
     currentComic = item;
     pageIndex = 0;
@@ -2562,6 +2808,7 @@
       return;
     }
 
+    pushNav();
     showView('reader');
     currentComic = { id: meta.id, name: meta.name };
     pageIndex = 0;
@@ -2627,7 +2874,18 @@
     requestAnimationFrame(() => requestAnimationFrame(() => img.classList.add('page-visible')));
     $('reader-count').textContent = (pageIndex + 1) + ' / ' + pages.length;
     $('scrubber').value = String(pageIndex);
+    updateScrubberFill();
     queueSave();
+  }
+
+  // -webkit-appearance:none strips the native fill track entirely on
+  // Chrome/Safari, so the filled segment is redrawn as a background
+  // gradient split at the current position (Firefox gets a real fill
+  // via ::-moz-range-progress in CSS instead).
+  function updateScrubberFill() {
+    const max = pages.length > 1 ? pages.length - 1 : 1;
+    const pct = Math.min(100, Math.round((pageIndex / max) * 100));
+    $('scrubber').style.background = 'linear-gradient(to right, var(--accent) ' + pct + '%, rgba(255,255,255,.3) ' + pct + '%)';
   }
 
   function queueSave() {
@@ -2762,6 +3020,13 @@
     const img = $('reader-img');
     img.classList.toggle('zooming', !animate);
     img.style.transform = 'translate(' + zoomX + 'px, ' + zoomY + 'px) scale(' + zoomScale + ')';
+    const readout = $('zoom-readout');
+    if (zoomScale > 1.01) {
+      readout.textContent = Math.round(zoomScale * 100) + '%';
+      readout.classList.remove('hidden');
+    } else {
+      readout.classList.add('hidden');
+    }
   }
 
   function clampPan() {
@@ -2872,6 +3137,9 @@
     const dy = e.changedTouches[0].clientY - touchStartY;
     if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) {
       if (dx < 0) nextPage(); else prevPage();
+    } else if (dy > 90 && dy > Math.abs(dx) * 1.5) {
+      popNav(1);
+      closeReader();
     }
     touchStartX = null; touchStartY = null;
   });
@@ -2881,7 +3149,7 @@
     if ($('view-reader').classList.contains('hidden')) return;
     if (e.key === 'ArrowRight' || e.key === ' ') { nextPage(); e.preventDefault(); }
     else if (e.key === 'ArrowLeft') { prevPage(); }
-    else if (e.key === 'Escape') { closeReader(); }
+    else if (e.key === 'Escape') { popNav(1); closeReader(); }
   });
 
   $('scrubber').addEventListener('input', (e) => {
@@ -2892,7 +3160,7 @@
   $('scrubber').addEventListener('change', hideScrubPreview);
   $('scrubber').addEventListener('touchend', hideScrubPreview);
   $('scrubber').addEventListener('mouseup', hideScrubPreview);
-  $('btn-close-reader').addEventListener('click', () => closeReader());
+  $('btn-close-reader').addEventListener('click', () => { popNav(1); closeReader(); });
 
   // ---------------------------------------------------------------------
   // Header actions
@@ -2989,15 +3257,22 @@
   $('search-input').addEventListener('input', (e) => {
     clearTimeout(searchDebounce);
     const q = e.target.value.trim();
+    $('search-clear').classList.toggle('hidden', q.length === 0);
     if (q.length === 0) { loadCurrentFolder(); return; }
     searchDebounce = setTimeout(() => runSearch(q), 300);
   });
+  $('search-clear').addEventListener('click', () => {
+    $('search-input').value = '';
+    $('search-clear').classList.add('hidden');
+    clearTimeout(searchDebounce);
+    loadCurrentFolder();
+  });
 
-  $('btn-stats').addEventListener('click', () => showView('stats'));
-  $('btn-stats-back').addEventListener('click', () => showView('library'));
+  $('btn-stats').addEventListener('click', () => { pushNav(); showView('stats'); });
+  $('btn-stats-back').addEventListener('click', () => { popNav(1); showView('library'); });
 
-  $('btn-settings').addEventListener('click', () => showView('settings'));
-  $('btn-settings-back').addEventListener('click', () => showView('library'));
+  $('btn-settings').addEventListener('click', () => { pushNav(); showView('settings'); });
+  $('btn-settings-back').addEventListener('click', () => { popNav(1); showView('library'); });
   $('btn-settings-save-goal').addEventListener('click', saveGoalFromSettings);
   $('btn-clear-all-cache').addEventListener('click', () => {
     $('clear-cache-modal').classList.remove('hidden');
@@ -3013,8 +3288,9 @@
     clearAllCachedComics();
   });
 
-  $('btn-orders').addEventListener('click', () => showView('orders'));
+  $('btn-orders').addEventListener('click', () => { pushNav(); showView('orders'); });
   $('btn-orders-back').addEventListener('click', () => {
+    popNav(1);
     if (currentOrderName) renderOrdersList();
     else showView('library');
   });
