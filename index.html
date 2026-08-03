@@ -280,6 +280,12 @@
     transition:transform .12s ease;opacity:.7;
   }
   .row-search:active{transform:scale(0.8);}
+  .row-tbr{
+    background:none;border:none;font-size:15px;line-height:1;color:var(--muted);
+    cursor:pointer;padding:6px;flex-shrink:0;opacity:.7;transition:transform .12s ease;
+  }
+  .row-tbr.active{color:var(--accent);opacity:1;}
+  .row-tbr:active{transform:scale(0.8);}
   .row-read{
     background:none;border:none;font-size:16px;line-height:1;color:var(--muted);
     cursor:pointer;padding:6px;flex-shrink:0;transition:transform .12s ease;
@@ -505,6 +511,7 @@
     <div class="pull-indicator" id="pull-indicator">↻</div>
     <div class="streak-goal-card" id="streak-goal-card"></div>
     <div id="nextup-shelf-wrap"></div>
+    <div id="tbr-shelf-wrap"></div>
     <div id="favorites-shelf-wrap"></div>
     <div id="continue-shelf-wrap"></div>
     <div id="offline-shelf-wrap"></div>
@@ -636,6 +643,7 @@
   <div class="modal-card">
     <div class="modal-title" id="row-actions-title"></div>
     <div class="modal-list">
+      <button class="modal-list-item row-action-item" id="ra-tbr"></button>
       <button class="modal-list-item row-action-item" id="ra-read"></button>
       <button class="modal-list-item row-action-item" id="ra-order">📑 Add to reading order</button>
       <button class="modal-list-item row-action-item" id="ra-download"></button>
@@ -976,6 +984,7 @@
     loadReadingLogAndSettings();
     loadConnectedAccount();
     loadNextUpShelf();
+    loadTBRShelf();
     loadFavoritesShelf();
     loadContinueReading();
     loadOfflineShelf();
@@ -1372,13 +1381,14 @@
   // how a folder tap should navigate: pushing onto the current
   // breadcrumb (normal browsing) vs. resetting it (search results,
   // whose true ancestry isn't known).
-  function buildItemRow(item, progressMap, favoriteFolderIds, openFolderFn) {
+  function buildItemRow(item, progressMap, favoriteFolderIds, openFolderFn, tbrFolderIds) {
     const row = document.createElement('div');
     row.className = 'row';
     const isFolder = item.mimeType === 'application/vnd.google-apps.folder';
     const p = progressMap[item.id];
     const cover = !isFolder && coverUrl(p);
     const isFavorite = isFolder ? favoriteFolderIds.has(item.id) : !!(p && p['Favorite']);
+    const isTBR = isFolder ? (tbrFolderIds && tbrFolderIds.has(item.id)) : !!(p && p['Want To Read']);
     const isFinished = !isFolder && !!(p && p['Finished']);
     const isPinned = !isFolder && !!(findCachedComicMeta(item.id) && findCachedComicMeta(item.id).pinned);
     if (isFinished) row.classList.add('row-finished');
@@ -1389,6 +1399,7 @@
         <div class="meta">
           ${isFolder ? '' : `<span class="badge">${formatOf(item.name)}</span>`}
           ${isFavorite ? '<span class="status-badge" title="Favorite">★</span>' : ''}
+          ${isTBR ? '<span class="status-badge" title="Want to read">🔖</span>' : ''}
           ${isPinned ? '<span class="status-badge" title="Downloaded for offline">📌</span>' : ''}
           ${p ? `<span>${p['Last Page'] || 0} / ${p['Total Pages'] || '?'} pages</span>` : ''}
         </div>
@@ -1397,6 +1408,7 @@
       <button class="row-star ${isFavorite ? 'active' : ''}" aria-label="${isFavorite ? 'Remove favorite' : 'Favorite'}">${isFavorite ? '★' : '☆'}</button>
       <button class="row-menu" aria-label="More actions">⋯</button>
       <a class="row-search hidden" href="${escapeHtml(lcgSearchUrl(item.name))}" target="_blank" rel="noopener" aria-label="Search on League of Comic Geeks">🔍</a>
+      <button class="row-tbr hidden ${isTBR ? 'active' : ''}" aria-label="${isTBR ? 'Remove from want to read' : 'Add to want to read'}">${isTBR ? '🔖' : '🔖'}</button>
       ${isFolder ? '' : `<button class="row-read hidden ${isFinished ? 'active' : ''}" aria-label="${isFinished ? 'Mark as unread' : 'Mark as read'}">${isFinished ? '✓' : '○'}</button>`}
       ${isFolder ? '' : `<button class="row-order hidden" aria-label="Add to reading order">📑</button>`}
       ${isFolder ? '' : `<button class="row-download hidden ${isPinned ? 'active' : ''}" aria-label="${isPinned ? 'Remove from offline downloads' : 'Download for offline'}">${isPinned ? '✓' : '⬇'}</button>`}
@@ -1413,6 +1425,11 @@
       else toggleFavoriteRow(item, e.currentTarget);
     });
     row.querySelector('.row-search').addEventListener('click', (e) => e.stopPropagation());
+    row.querySelector('.row-tbr').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (isFolder) toggleTBRFolder(item, e.currentTarget);
+      else toggleTBRRow(item, e.currentTarget);
+    });
     if (!isFolder) {
       row.querySelector('.row-read').addEventListener('click', (e) => {
         e.stopPropagation();
@@ -1445,6 +1462,9 @@
     rowActionsRow = row;
     rowActionsItem = item;
     $('row-actions-title').textContent = isFolder ? item.name : stripExt(item.name);
+
+    const isTBR = row.querySelector('.row-tbr').classList.contains('active');
+    $('ra-tbr').textContent = isTBR ? '🔖 Remove from want to read' : '🔖 Add to want to read';
 
     const rowRead = row.querySelector('.row-read');
     if (rowRead) {
@@ -1481,7 +1501,7 @@
   // ---------------------------------------------------------------------
   let listSort = localStorage.getItem('panelsListSort') || 'name';
   let listFavoritesOnly = localStorage.getItem('panelsListFavoritesOnly') === '1';
-  let lastListState = null; // { items, progressMap, favoriteFolderIds, openFolderFn, emptyMessage }
+  let lastListState = null; // { items, progressMap, favoriteFolderIds, openFolderFn, emptyMessage, tbrFolderIds }
 
   // Comics currently visible in folder-list, in display order — read
   // fresh at row-click time (see buildItemRow) rather than captured when
@@ -1514,7 +1534,7 @@
 
   function renderFolderList() {
     if (!lastListState) return;
-    const { items, progressMap, favoriteFolderIds, openFolderFn, emptyMessage } = lastListState;
+    const { items, progressMap, favoriteFolderIds, openFolderFn, emptyMessage, tbrFolderIds } = lastListState;
     const list = $('folder-list');
     const filtered = applySortFilter(items, progressMap, favoriteFolderIds);
     visibleComicSequence = filtered.filter((it) => it.mimeType !== 'application/vnd.google-apps.folder');
@@ -1525,7 +1545,7 @@
     }
     list.innerHTML = '';
     filtered.forEach(item => {
-      const row = buildItemRow(item, progressMap, favoriteFolderIds, openFolderFn);
+      const row = buildItemRow(item, progressMap, favoriteFolderIds, openFolderFn, tbrFolderIds);
       row.setAttribute('data-first-letter', firstLetterOf(itemDisplayName(item)));
       list.appendChild(row);
     });
@@ -1541,12 +1561,12 @@
     try {
       const items = await listFolder(current.id);
       if (items.length === 0) {
-        lastListState = { items: [], progressMap: {}, favoriteFolderIds: new Set(), openFolderFn: openFolder, emptyMessage: 'No folders or comics (.cbz/.cbr) here.' };
+        lastListState = { items: [], progressMap: {}, favoriteFolderIds: new Set(), openFolderFn: openFolder, emptyMessage: 'No folders or comics (.cbz/.cbr) here.', tbrFolderIds: new Set() };
         list.innerHTML = '<div class="empty-state">No folders or comics (.cbz/.cbr) here.</div>';
         return;
       }
-      const [progressMap, favoriteFolderIds] = await Promise.all([fetchProgressMap(), fetchFavoriteFolderIds()]);
-      lastListState = { items, progressMap, favoriteFolderIds, openFolderFn: openFolder, emptyMessage: 'No folders or comics (.cbz/.cbr) here.' };
+      const [progressMap, favoriteFolderIds, tbrFolderIds] = await Promise.all([fetchProgressMap(), fetchFavoriteFolderIds(), fetchTBRFolderIds()]);
+      lastListState = { items, progressMap, favoriteFolderIds, openFolderFn: openFolder, emptyMessage: 'No folders or comics (.cbz/.cbr) here.', tbrFolderIds };
       renderFolderList();
     } catch (err) {
       list.innerHTML = '<div class="empty-state">' + escapeHtml(err.message || 'Something went wrong.') + '</div>';
@@ -1560,12 +1580,12 @@
     try {
       const items = await searchComics(query);
       if (items.length === 0) {
-        lastListState = { items: [], progressMap: {}, favoriteFolderIds: new Set(), openFolderFn: openFolderDirect, emptyMessage: 'No matches for "' + query + '".' };
+        lastListState = { items: [], progressMap: {}, favoriteFolderIds: new Set(), openFolderFn: openFolderDirect, emptyMessage: 'No matches for "' + query + '".', tbrFolderIds: new Set() };
         list.innerHTML = '<div class="empty-state">No matches for "' + escapeHtml(query) + '".</div>';
         return;
       }
-      const [progressMap, favoriteFolderIds] = await Promise.all([fetchProgressMap(), fetchFavoriteFolderIds()]);
-      lastListState = { items, progressMap, favoriteFolderIds, openFolderFn: openFolderDirect, emptyMessage: 'No matches for "' + query + '".' };
+      const [progressMap, favoriteFolderIds, tbrFolderIds] = await Promise.all([fetchProgressMap(), fetchFavoriteFolderIds(), fetchTBRFolderIds()]);
+      lastListState = { items, progressMap, favoriteFolderIds, openFolderFn: openFolderDirect, emptyMessage: 'No matches for "' + query + '".', tbrFolderIds };
       renderFolderList();
     } catch (err) {
       list.innerHTML = '<div class="empty-state">' + escapeHtml(err.message || 'Something went wrong.') + '</div>';
@@ -1874,6 +1894,35 @@
     }
   }
 
+  async function fetchTBRFolderIds() {
+    try {
+      const resp = await fetch(WORKER_URL + '/tbrfolders');
+      if (!resp.ok) return new Set();
+      const data = await resp.json();
+      return new Set((data.records || []).map((r) => r.fields['Drive Folder ID']));
+    } catch (e) {
+      return new Set();
+    }
+  }
+
+  async function toggleTBRFolder(item, btn) {
+    const newVal = !btn.classList.contains('active');
+    btn.classList.toggle('active', newVal);
+    btn.setAttribute('aria-label', newVal ? 'Remove from want to read' : 'Add to want to read');
+    try {
+      if (newVal) {
+        await fetch(WORKER_URL + '/tbrfolders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fields: { 'Drive Folder ID': item.id, 'Name': item.name } }),
+        });
+      } else {
+        await fetch(WORKER_URL + '/tbrfolders?driveFolderId=' + encodeURIComponent(item.id), { method: 'DELETE' });
+      }
+    } catch (e) { /* best effort — TBR folders aren't queued/retried like progress is */ }
+    loadTBRShelf();
+  }
+
   async function toggleFavoriteFolder(item, btn) {
     const newVal = !btn.classList.contains('active');
     btn.classList.toggle('active', newVal);
@@ -2106,6 +2155,72 @@
     }
   }
 
+  // Manually curated "want to read" queue — distinct from Next Up (which
+  // is algorithmic, sorted by release date). A comic clears itself out
+  // the first time it's actually opened (see queueSave/closeReader).
+  async function loadTBRShelf() {
+    const wrap = $('tbr-shelf-wrap');
+    try {
+      const [progressResp, foldersResp] = await Promise.all([
+        fetch(WORKER_URL + '/progress'),
+        fetch(WORKER_URL + '/tbrfolders'),
+      ]);
+      if (!progressResp.ok || !foldersResp.ok) throw new Error('Worker request failed');
+      const comics = (await progressResp.json()).records
+        .filter((r) => r.fields['Want To Read'])
+        .map((r) => ({ type: 'comic', id: r.fields['Drive File ID'], name: r.fields['Title'] || 'Untitled', cover: coverUrl(r.fields), finished: !!r.fields['Finished'] }));
+      const folders = (await foldersResp.json()).records
+        .map((r) => ({ type: 'folder', id: r.fields['Drive Folder ID'], name: r.fields['Name'] || 'Untitled', cover: null, finished: false }));
+      const items = comics.concat(folders)
+        .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+      if (items.length === 0) { wrap.innerHTML = ''; return; }
+
+      let html = '<div class="shelf-title">Want to read</div><div class="shelf">';
+      items.forEach((it) => {
+        html += `
+          <div class="shelf-card${it.finished ? ' shelf-card-finished' : ''}" data-drive-id="${escapeHtml(it.id)}" data-type="${it.type}">
+            <button class="shelf-card-dismiss" aria-label="Remove from want to read">🔖</button>
+            <div class="shelf-cover">${it.cover ? `<img class="cover-thumb" src="${escapeHtml(it.cover)}" alt="${escapeHtml(it.name)}" />` : (it.type === 'folder' ? '📁' : '📕')}</div>
+            <div class="shelf-card-body">
+              ${it.cover ? '' : `<div class="name">${escapeHtml(it.name)}</div>`}
+            </div>
+          </div>`;
+      });
+      html += '</div>';
+      wrap.innerHTML = html;
+      wrap.querySelectorAll('.shelf-card').forEach((card) => {
+        const id = card.getAttribute('data-drive-id');
+        const type = card.getAttribute('data-type');
+        card.addEventListener('click', async () => {
+          if (type === 'folder') {
+            const item = items.find((it) => it.type === 'folder' && it.id === id);
+            openFolderDirect(id, item ? item.name : 'Folder');
+            return;
+          }
+          try {
+            const meta = await driveFetch('/files/' + id, { fields: 'id,name,mimeType,size' });
+            readNextContext = null;
+            openComic(meta);
+          } catch (e) {
+            showToast('Couldn\'t find that file anymore — it may have moved in Drive.');
+          }
+        });
+        card.querySelector('.shelf-card-dismiss').addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (type === 'folder') {
+            fetch(WORKER_URL + '/tbrfolders?driveFolderId=' + encodeURIComponent(id), { method: 'DELETE' }).catch(() => {});
+          } else {
+            saveProgress({ 'Drive File ID': id, 'Want To Read': false });
+          }
+          card.remove();
+          if (!wrap.querySelector('.shelf-card')) wrap.innerHTML = '';
+        });
+      });
+    } catch (e) {
+      renderShelfError(wrap, loadTBRShelf);
+    }
+  }
+
   // Comics deliberately downloaded via toggleOfflineDownload (pinned),
   // not the incidental cache that just follows from reading online —
   // a dedicated spot for "a few things to read on the train," separate
@@ -2156,6 +2271,19 @@
       'Favorite': newVal,
     });
     loadFavoritesShelf();
+  }
+
+  function toggleTBRRow(item, btn) {
+    const newVal = !btn.classList.contains('active');
+    btn.classList.toggle('active', newVal);
+    btn.setAttribute('aria-label', newVal ? 'Remove from want to read' : 'Add to want to read');
+    saveProgress({
+      'Drive File ID': item.id,
+      'Title': stripExt(item.name),
+      'Format': formatOf(item.name),
+      'Want To Read': newVal,
+    });
+    loadTBRShelf();
   }
 
   // Manual read/unread override — for comics you finished elsewhere, or
@@ -3046,6 +3174,7 @@
         'Total Pages': pages.length,
         'Last Opened': new Date().toISOString(),
         'Dismissed': false,
+        'Want To Read': false,
       });
       if (pageIndex > sessionLoggedUpTo) {
         logPagesRead(pageIndex - sessionLoggedUpTo);
@@ -3117,6 +3246,7 @@
         'Total Pages': pages.length,
         'Last Opened': new Date().toISOString(),
         'Dismissed': false,
+        'Want To Read': false,
       });
       if (pageIndex > sessionLoggedUpTo) {
         logPagesRead(pageIndex - sessionLoggedUpTo);
@@ -3329,7 +3459,7 @@
     $('btn-refresh').disabled = true;
     $('btn-refresh-icon').classList.add('spinning');
     libraryFolderIdsCache = null;
-    Promise.all([loadNextUpShelf(), loadFavoritesShelf(), loadContinueReading(), loadOfflineShelf(), loadCurrentFolder()])
+    Promise.all([loadNextUpShelf(), loadTBRShelf(), loadFavoritesShelf(), loadContinueReading(), loadOfflineShelf(), loadCurrentFolder()])
       .finally(() => {
         $('btn-refresh').disabled = false;
         $('btn-refresh-icon').classList.remove('spinning');
@@ -3373,7 +3503,7 @@
       if (pulledEnough && !refreshing) {
         refreshing = true;
         libraryFolderIdsCache = null;
-        Promise.all([loadNextUpShelf(), loadFavoritesShelf(), loadContinueReading(), loadOfflineShelf(), loadCurrentFolder()])
+        Promise.all([loadNextUpShelf(), loadTBRShelf(), loadFavoritesShelf(), loadContinueReading(), loadOfflineShelf(), loadCurrentFolder()])
           .finally(() => {
             refreshing = false;
             indicator.style.opacity = '0';
@@ -3457,6 +3587,10 @@
   $('btn-cancel-row-actions').addEventListener('click', closeRowActionsMenu);
   $('row-actions-modal').addEventListener('click', (e) => {
     if (e.target.id === 'row-actions-modal') closeRowActionsMenu();
+  });
+  $('ra-tbr').addEventListener('click', () => {
+    if (rowActionsRow) rowActionsRow.querySelector('.row-tbr').click();
+    closeRowActionsMenu();
   });
   $('ra-read').addEventListener('click', () => {
     if (rowActionsRow) rowActionsRow.querySelector('.row-read').click();
