@@ -53,6 +53,26 @@
   .btn-danger{background:var(--accent);}
   .btn:active{transform:scale(0.96);}
   .btn-outline{background:transparent;color:var(--ink);border:1.5px solid var(--border);}
+  .connect-local-btn{margin-top:12px;}
+  .connect-or{font-size:12px;color:var(--muted);margin:16px 0;text-transform:uppercase;letter-spacing:.05em;}
+  /* Local-folder mode has no Drive/Airtable backing, so anything that
+     reads or writes those services is hidden rather than left to fail
+     silently row by row. */
+  body.local-mode .row-star,
+  body.local-mode .row-menu,
+  body.local-mode .row-download,
+  body.local-mode #nextup-shelf-wrap,
+  body.local-mode #tbr-shelf-wrap,
+  body.local-mode #favorites-shelf-wrap,
+  body.local-mode #continue-shelf-wrap,
+  body.local-mode #offline-shelf-wrap,
+  body.local-mode #streak-goal-card,
+  body.local-mode #btn-orders,
+  body.local-mode #btn-stats,
+  body.local-mode #filter-favorites,
+  body.local-mode #settings-goal-section,
+  body.local-mode #settings-library-root-section,
+  body.local-mode #settings-cache-section{display:none !important;}
   .setup-note{
     margin-top:22px;font-size:12.5px;color:var(--muted);background:var(--accent-soft);
     border-radius:var(--radius-sm);padding:10px 14px;text-align:left;line-height:1.5;
@@ -472,6 +492,8 @@
       <strong>One-time setup needed:</strong> this copy of the app doesn't have a Google OAuth Client ID yet.
       Edit the <code>GOOGLE_CLIENT_ID</code> constant near the top of the script with your own, then reload.
     </div>
+    <p class="connect-or">or</p>
+    <button class="btn btn-outline connect-local-btn" id="btn-use-local">Use a local folder</button>
   </div>
 </div>
 
@@ -549,7 +571,7 @@
     <button class="link-btn" id="btn-settings-back">Back</button>
   </header>
   <main class="scroll" id="settings-main">
-    <div class="settings-section">
+    <div class="settings-section" id="settings-goal-section">
       <div class="settings-label">Daily reading goal</div>
       <div class="modal-new-row">
         <input type="number" id="settings-goal-input" min="1" inputmode="numeric" />
@@ -558,12 +580,19 @@
     </div>
     <div class="settings-section">
       <div class="settings-label-row">
+        <div class="settings-label">Comic source <span id="settings-source-name"></span></div>
+        <button class="link-btn" id="btn-switch-source"></button>
+      </div>
+      <p class="modal-desc" id="settings-source-desc"></p>
+    </div>
+    <div class="settings-section" id="settings-library-root-section">
+      <div class="settings-label-row">
         <div class="settings-label">Library folder <span id="settings-root-name"></span></div>
         <button class="link-btn hidden" id="btn-reset-library-root">Use My Drive</button>
       </div>
       <p class="modal-desc" id="settings-root-desc"></p>
     </div>
-    <div class="settings-section">
+    <div class="settings-section" id="settings-cache-section">
       <div class="settings-label-row">
         <div class="settings-label">Offline cache <span id="settings-cache-count"></span></div>
         <button class="link-btn link-btn-danger hidden" id="btn-clear-all-cache">Clear all</button>
@@ -631,8 +660,8 @@
 <!-- ================= DISCONNECT CONFIRM MODAL ================= -->
 <div id="disconnect-modal" class="modal-overlay hidden">
   <div class="modal-card">
-    <div class="modal-title">Disconnect Google Drive?</div>
-    <p class="modal-desc">You'll need to reconnect to browse or download new comics. Anything already cached offline stays available.</p>
+    <div class="modal-title" id="disconnect-modal-title">Disconnect Google Drive?</div>
+    <p class="modal-desc" id="disconnect-modal-desc">You'll need to reconnect to browse or download new comics. Anything already cached offline stays available.</p>
     <button class="btn btn-danger" id="btn-confirm-disconnect">Disconnect</button>
     <button class="link-btn" id="btn-cancel-disconnect-modal">Cancel</button>
   </div>
@@ -724,6 +753,27 @@
   const NEEDS_SETUP = GOOGLE_CLIENT_ID.startsWith('PASTE_');
 
   // ---------------------------------------------------------------------
+  // Local-folder mode — an alternative to Drive that reads comics
+  // straight off disk via the File System Access API, so browsing and
+  // opening a comic never waits on a network round trip. 'local' items
+  // are given the same mimeType sentinel Drive uses for folders
+  // ('application/vnd.google-apps.folder') so all the existing
+  // folder/comic branching (buildItemRow, listFolder's filter, the AZ
+  // rail, etc.) works on them unmodified; a 'kind' field ('file' or
+  // 'directory') is what the local-specific code paths key off instead.
+  // Everything backed by Airtable (favorites, TBR, reading orders,
+  // stats, cross-device progress sync) has no local equivalent and is
+  // hidden via the body.local-mode CSS rules rather than half-ported.
+  // ---------------------------------------------------------------------
+  const LIBRARY_SOURCE_KEY = 'panelsLibrarySource';
+  const LOCAL_DB_NAME = 'panelsLocalLibrary';
+  const LOCAL_DB_STORE = 'handles';
+  let librarySource = localStorage.getItem(LIBRARY_SOURCE_KEY) || 'drive'; // 'drive' | 'local'
+  let localRootHandle = null; // FileSystemDirectoryHandle
+  let localHandleCache = new Map(); // relative path -> FileSystemDirectoryHandle | FileSystemFileHandle
+  let localTreeCache = null; // flattened comic list under the root, built lazily for search
+
+  // ---------------------------------------------------------------------
   // Small utilities
   // ---------------------------------------------------------------------
   const $ = (id) => document.getElementById(id);
@@ -807,6 +857,208 @@
   }
 
   // ---------------------------------------------------------------------
+  // Local-folder storage — a picked FileSystemDirectoryHandle is kept in
+  // IndexedDB (localStorage can't hold structured-clone values) so it
+  // survives a reload; re-opening it still needs one requestPermission()
+  // call from a real user gesture, which is why this is only invoked
+  // from click handlers, never from the boot sequence directly.
+  // ---------------------------------------------------------------------
+  function openLocalDB() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(LOCAL_DB_NAME, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(LOCAL_DB_STORE);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function saveLocalRootHandle(handle) {
+    const db = await openLocalDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(LOCAL_DB_STORE, 'readwrite');
+      tx.objectStore(LOCAL_DB_STORE).put(handle, 'root');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  async function loadLocalRootHandle() {
+    const db = await openLocalDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(LOCAL_DB_STORE, 'readonly');
+      const req = tx.objectStore(LOCAL_DB_STORE).get('root');
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function clearLocalRootHandle() {
+    const db = await openLocalDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(LOCAL_DB_STORE, 'readwrite');
+      tx.objectStore(LOCAL_DB_STORE).delete('root');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  function joinPath(base, name) {
+    return base ? base + '/' + name : name;
+  }
+
+  // Lists one local folder's immediate children — the local counterpart
+  // to listFolder(). Folders get Drive's own folder mimeType sentinel so
+  // every existing "is this a folder" check keeps working unmodified;
+  // comic files are left without a real size (skipping a getFile() await
+  // per entry) since nothing in local mode needs it before the file is
+  // actually opened.
+  async function listLocalFolder(path) {
+    const dirHandle = localHandleCache.get(path);
+    if (!dirHandle) throw new Error("That folder isn't available — try reopening your local library.");
+    const items = [];
+    for await (const [name, handle] of dirHandle.entries()) {
+      const childPath = joinPath(path, name);
+      if (handle.kind === 'directory') {
+        localHandleCache.set(childPath, handle);
+        items.push({ id: childPath, name, mimeType: 'application/vnd.google-apps.folder', size: 0, createdTime: null, kind: 'directory' });
+      } else if (isComicFile(name)) {
+        localHandleCache.set(childPath, handle);
+        items.push({ id: childPath, name, mimeType: 'application/octet-stream', size: 0, createdTime: null, kind: 'file' });
+      }
+    }
+    items.sort((a, b) => {
+      const aFolder = a.mimeType === 'application/vnd.google-apps.folder';
+      const bFolder = b.mimeType === 'application/vnd.google-apps.folder';
+      if (aFolder !== bFolder) return aFolder ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    return items;
+  }
+
+  // Recursively walks the whole local tree once (cached until the root
+  // changes or a pull-to-refresh invalidates it) so search doesn't need
+  // a real index — fine at personal-library scale, and still far faster
+  // than a Drive round trip.
+  async function buildLocalTree() {
+    if (localTreeCache) return localTreeCache;
+    const results = [];
+    async function walk(dirHandle, path) {
+      for await (const [name, handle] of dirHandle.entries()) {
+        const childPath = joinPath(path, name);
+        if (handle.kind === 'directory') {
+          localHandleCache.set(childPath, handle);
+          await walk(handle, childPath);
+        } else if (isComicFile(name)) {
+          localHandleCache.set(childPath, handle);
+          results.push({ id: childPath, name, mimeType: 'application/octet-stream', size: 0, createdTime: null, kind: 'file' });
+        }
+      }
+    }
+    await walk(localRootHandle, '');
+    localTreeCache = results;
+    return results;
+  }
+
+  async function searchLocalComics(query) {
+    const tree = await buildLocalTree();
+    const q = query.toLowerCase();
+    return tree.filter((item) => item.name.toLowerCase().includes(q));
+  }
+
+  // Builds a Drive-progressMap-shaped object out of the plain local
+  // resume-position cache (see "Local comic cache" below) so
+  // buildItemRow's existing progress-bar/page-count rendering works on
+  // local rows with no extra plumbing.
+  function localProgressMap() {
+    const map = {};
+    loadCachedComics().forEach((c) => {
+      map[c.id] = { 'Last Page': c.lastPage, 'Total Pages': c.totalPages };
+    });
+    return map;
+  }
+
+  // Entry point for both "Use a local folder" on the connect screen and
+  // "Switch to a local folder" in Settings. Tries the previously granted
+  // handle first (silent if permission is still granted, one prompt if
+  // it's merely still remembered), and only falls back to a fresh
+  // directory picker if there's no usable handle at all. Always called
+  // from a click handler — requestPermission()/showDirectoryPicker() both
+  // require a real user gesture.
+  async function useLocalFolder() {
+    try {
+      let handle = await loadLocalRootHandle();
+      if (handle) {
+        const perm = await handle.queryPermission({ mode: 'read' });
+        if (perm !== 'granted') {
+          const granted = await handle.requestPermission({ mode: 'read' });
+          if (granted !== 'granted') handle = null;
+        }
+      }
+      if (!handle) {
+        if (!window.showDirectoryPicker) {
+          showToast('Local folders need a Chromium browser (Chrome or Edge) — try Connect Google Drive instead.');
+          return;
+        }
+        handle = await window.showDirectoryPicker({ id: 'panels-library', mode: 'read' });
+        await saveLocalRootHandle(handle);
+      }
+      localRootHandle = handle;
+      localHandleCache = new Map([['', handle]]);
+      localTreeCache = null;
+      librarySource = 'local';
+      localStorage.setItem(LIBRARY_SOURCE_KEY, 'local');
+      crumbs = [{ id: '', name: handle.name }];
+      saveCrumbs();
+      document.body.classList.add('local-mode');
+      enterLibrary();
+    } catch (e) {
+      if (e.name !== 'AbortError') showToast("Couldn't open that folder.");
+    }
+  }
+
+  // Silent resume path for boot: only succeeds if permission is still
+  // granted without a prompt, since there's no user gesture available
+  // this early. If it comes back false, the connect screen's "Use a
+  // local folder" button (which does have a gesture to work with) is
+  // what actually re-requests permission.
+  async function tryAutoResumeLocal() {
+    if (librarySource !== 'local') return false;
+    try {
+      const handle = await loadLocalRootHandle();
+      if (!handle) return false;
+      const perm = await handle.queryPermission({ mode: 'read' });
+      if (perm !== 'granted') return false;
+      localRootHandle = handle;
+      localHandleCache = new Map([['', handle]]);
+      localTreeCache = null;
+      crumbs = [{ id: '', name: handle.name }];
+      saveCrumbs();
+      document.body.classList.add('local-mode');
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function disconnectLocal() {
+    librarySource = 'drive';
+    localStorage.setItem(LIBRARY_SOURCE_KEY, 'drive');
+    clearLocalRootHandle();
+    localRootHandle = null;
+    localHandleCache = new Map();
+    localTreeCache = null;
+    document.body.classList.remove('local-mode');
+    crumbs = [libraryRoot || { id: 'root', name: 'My Drive' }];
+    saveCrumbs();
+    showView('connect');
+  }
+
+  function disconnectCurrentSource() {
+    if (librarySource === 'local') disconnectLocal();
+    else disconnectDrive();
+  }
+
+  // ---------------------------------------------------------------------
   // Auth (Google Identity Services token client). Stored in localStorage
   // rather than sessionStorage so a still-valid token (Google issues them
   // for ~1hr) survives a PWA relaunch — on iOS/Android, reopening an
@@ -835,6 +1087,9 @@
         tokenExpiry = Date.now() + (Number(resp.expires_in || 3500) * 1000);
         localStorage.setItem('panelsAccessToken', accessToken);
         localStorage.setItem('panelsTokenExpiry', String(tokenExpiry));
+        librarySource = 'drive';
+        localStorage.setItem(LIBRARY_SOURCE_KEY, 'drive');
+        document.body.classList.remove('local-mode');
         enterLibrary();
       },
     });
@@ -980,7 +1235,13 @@
 
   function enterLibrary() {
     showView('library');
+    document.body.classList.toggle('local-mode', librarySource === 'local');
     renderBreadcrumb();
+    if (librarySource === 'local') {
+      $('account-indicator').textContent = localRootHandle ? localRootHandle.name : '';
+      loadCurrentFolder();
+      return;
+    }
     loadReadingLogAndSettings();
     loadConnectedAccount();
     loadNextUpShelf();
@@ -1028,6 +1289,7 @@
   }
 
   async function listFolder(folderId) {
+    if (librarySource === 'local') return listLocalFolder(folderId);
     let items = [];
     let pageToken = undefined;
     do {
@@ -1158,6 +1420,7 @@
   // same folder-or-comic filter as listFolder(), so a matching series
   // folder surfaces alongside matching issues.
   async function searchComics(query) {
+    if (librarySource === 'local') return searchLocalComics(query);
     const safeQuery = query.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
     const data = await driveFetchScopedToLibrary(
       `trashed = false and name contains '${safeQuery}'`,
@@ -1786,6 +2049,15 @@
 
   function renderSettings() {
     $('settings-goal-input').value = String(dailyGoal);
+    if (librarySource === 'local') {
+      $('settings-source-name').textContent = '(Local folder — ' + (localRootHandle ? localRootHandle.name : '…') + ')';
+      $('settings-source-desc').textContent = 'Reading straight from files on this device — no Drive account, no network needed to browse or read.';
+      $('btn-switch-source').textContent = 'Switch to Google Drive';
+      return;
+    }
+    $('settings-source-name').textContent = '(Google Drive)';
+    $('settings-source-desc').textContent = 'Comics are streamed from your connected Drive account.';
+    $('btn-switch-source').textContent = 'Use a local folder instead';
     renderSettingsCache();
     if (libraryRoot) {
       $('settings-root-name').textContent = '(' + libraryRoot.name + ')';
@@ -1805,6 +2077,7 @@
     if (entry) entry.pagesRead = (entry.pagesRead || 0) + delta;
     else { entry = { date: today, pagesRead: delta }; readingLog.push(entry); }
     renderStreakGoalCard();
+    if (librarySource === 'local') return; // streak-goal-card is hidden in local mode; no server-side log to keep in sync
     fetch(WORKER_URL + '/readinglog', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -1871,6 +2144,7 @@
   // Progress sync (Airtable via Cloudflare Worker)
   // ---------------------------------------------------------------------
   async function fetchProgressMap() {
+    if (librarySource === 'local') return localProgressMap();
     try {
       const resp = await fetch(WORKER_URL + '/progress');
       if (!resp.ok) return {};
@@ -1884,6 +2158,7 @@
   }
 
   async function fetchFavoriteFolderIds() {
+    if (librarySource === 'local') return new Set();
     try {
       const resp = await fetch(WORKER_URL + '/favoritefolders');
       if (!resp.ok) return new Set();
@@ -1895,6 +2170,7 @@
   }
 
   async function fetchTBRFolderIds() {
+    if (librarySource === 'local') return new Set();
     try {
       const resp = await fetch(WORKER_URL + '/tbrfolders');
       if (!resp.ok) return new Set();
@@ -2649,6 +2925,7 @@
   }
 
   function saveProgress(fields) {
+    if (librarySource === 'local') return; // local comics have no 'Drive File ID' to key an Airtable row on
     queuePendingProgress(fields); // persisted first — survives a dropped connection
     flushProgressQueue();
   }
@@ -2989,65 +3266,85 @@
     pageIndex = 0;
     pages = [];
     resetZoom(false);
+    const isLocal = item.kind === 'file';
     $('load-overlay').classList.remove('hidden');
-    setLoadProgress(0, 'Downloading…');
+    setLoadProgress(0, isLocal ? 'Reading…' : 'Downloading…');
 
     try {
-      let buffer = await getCachedComicBuffer(item.id);
-      if (buffer) {
+      let buffer;
+      if (isLocal) {
+        const handle = localHandleCache.get(item.id);
+        if (!handle) throw new Error("That comic isn't available — try reopening your local library.");
+        const file = await handle.getFile();
+        buffer = await file.arrayBuffer();
         setLoadProgress(60, 'Unpacking pages…');
-        recordCachedComicAccess(item);
       } else {
-        buffer = await downloadWithProgress(item.id, item.size ? Number(item.size) : null);
-        setLoadProgress(60, 'Unpacking pages…');
-        cacheComicBuffer(item, buffer);
+        buffer = await getCachedComicBuffer(item.id);
+        if (buffer) {
+          setLoadProgress(60, 'Unpacking pages…');
+          recordCachedComicAccess(item);
+        } else {
+          buffer = await downloadWithProgress(item.id, item.size ? Number(item.size) : null);
+          setLoadProgress(60, 'Unpacking pages…');
+          cacheComicBuffer(item, buffer);
+        }
       }
       const extracted = await window.ComicArchive.extractPages(buffer, item.name);
       pages = extracted;
       setLoadProgress(100, 'Ready');
 
-      // resume from saved progress, if any. If the Worker's unreachable
-      // (no signal, or just no Drive/Worker access right now), fall back
-      // to the locally cached resume position for this same file.
       let resumeAt = 0;
-      let reachedWorker = false;
-      let rec = null;
-      try {
-        const resp = await fetch(WORKER_URL + '/progress?driveId=' + encodeURIComponent(item.id));
-        if (resp.ok) {
-          reachedWorker = true;
-          const data = await resp.json();
-          rec = (data.records || [])[0];
-          if (rec && typeof rec.fields['Last Page'] === 'number') {
-            resumeAt = Math.min(rec.fields['Last Page'], pages.length - 1);
-          }
-        }
-      } catch (e) { /* best effort */ }
-
-      // If there's no Progress row yet, create it now and wait for it —
-      // this PATCH is the only place a row ever gets created, and
-      // awaiting it here (rather than racing it against queueSave()'s
-      // 800ms debounce in a detached background task) is what actually
-      // rules out duplicate-row creation under real network latency,
-      // not just makes it unlikely.
-      if (reachedWorker && !rec) {
-        await ensureProgressRow(item);
-      }
-
-      // Cover handling stays best-effort/non-blocking — it doesn't affect
-      // row creation, so no need to await it before rendering.
-      if (reachedWorker) {
-        if (!rec || !rec.fields['Cover']) {
-          generateAndUploadCover(item.id, pages[0].url);
-        } else {
-          cacheCoverFromUrl(item.id, coverUrl(rec.fields));
-        }
-      }
-
-      if (!reachedWorker) {
+      if (isLocal) {
+        // No Airtable to resolve resume position or a cover against —
+        // just the plain local resume-position cache (see below).
+        recordCachedComicAccess(item);
         const cachedMeta = findCachedComicMeta(item.id);
         if (cachedMeta && typeof cachedMeta.lastPage === 'number') {
           resumeAt = Math.min(cachedMeta.lastPage, pages.length - 1);
+        }
+      } else {
+        // resume from saved progress, if any. If the Worker's unreachable
+        // (no signal, or just no Drive/Worker access right now), fall back
+        // to the locally cached resume position for this same file.
+        let reachedWorker = false;
+        let rec = null;
+        try {
+          const resp = await fetch(WORKER_URL + '/progress?driveId=' + encodeURIComponent(item.id));
+          if (resp.ok) {
+            reachedWorker = true;
+            const data = await resp.json();
+            rec = (data.records || [])[0];
+            if (rec && typeof rec.fields['Last Page'] === 'number') {
+              resumeAt = Math.min(rec.fields['Last Page'], pages.length - 1);
+            }
+          }
+        } catch (e) { /* best effort */ }
+
+        // If there's no Progress row yet, create it now and wait for it —
+        // this PATCH is the only place a row ever gets created, and
+        // awaiting it here (rather than racing it against queueSave()'s
+        // 800ms debounce in a detached background task) is what actually
+        // rules out duplicate-row creation under real network latency,
+        // not just makes it unlikely.
+        if (reachedWorker && !rec) {
+          await ensureProgressRow(item);
+        }
+
+        // Cover handling stays best-effort/non-blocking — it doesn't affect
+        // row creation, so no need to await it before rendering.
+        if (reachedWorker) {
+          if (!rec || !rec.fields['Cover']) {
+            generateAndUploadCover(item.id, pages[0].url);
+          } else {
+            cacheCoverFromUrl(item.id, coverUrl(rec.fields));
+          }
+        }
+
+        if (!reachedWorker) {
+          const cachedMeta = findCachedComicMeta(item.id);
+          if (cachedMeta && typeof cachedMeta.lastPage === 'number') {
+            resumeAt = Math.min(cachedMeta.lastPage, pages.length - 1);
+          }
         }
       }
 
@@ -3255,12 +3552,18 @@
       updateCachedComicProgress(currentComic.id, pageIndex, pages.length);
     }
     if (currentComic && pages.length && pageIndex === pages.length - 1) {
-      clearCachedComic(currentComic.id);
-      saveProgress({
-        'Drive File ID': currentComic.id,
-        'Finished': true,
-        'Finished Date': todayISO(),
-      });
+      // Local comics have no Airtable 'Finished' flag to fall back on, so
+      // their local resume-position entry (which is also what drives the
+      // library row's progress bar — see localProgressMap()) is left in
+      // place at the last page instead of being evicted.
+      if (currentComic.kind !== 'file') {
+        clearCachedComic(currentComic.id);
+        saveProgress({
+          'Drive File ID': currentComic.id,
+          'Finished': true,
+          'Finished Date': todayISO(),
+        });
+      }
       let nextItem = null, nextContext = null;
       if (readNextContext && readNextContext.index >= 0 && readNextContext.index + 1 < readNextContext.items.length) {
         nextItem = readNextContext.items[readNextContext.index + 1];
@@ -3273,9 +3576,13 @@
     currentComic = null;
     // Route back to wherever actually makes sense: the library view needs
     // a valid Drive token (comics opened via openCachedComicOffline() have
-    // none), otherwise back to the connect screen — which re-renders the
-    // offline shelf with this comic's updated progress.
-    if (hasValidToken()) {
+    // none) or an active local library, otherwise back to the connect
+    // screen — which re-renders the offline shelf with this comic's
+    // updated progress.
+    if (librarySource === 'local') {
+      showView('library');
+      loadCurrentFolder();
+    } else if (hasValidToken()) {
       showView('library');
       loadContinueReading();
       loadOfflineShelf();
@@ -3442,6 +3749,13 @@
   // Header actions
   // ---------------------------------------------------------------------
   $('btn-disconnect').addEventListener('click', () => {
+    if (librarySource === 'local') {
+      $('disconnect-modal-title').textContent = 'Disconnect local folder?';
+      $('disconnect-modal-desc').textContent = "You'll need to pick it again (or connect Google Drive instead) to keep reading.";
+    } else {
+      $('disconnect-modal-title').textContent = 'Disconnect Google Drive?';
+      $('disconnect-modal-desc').textContent = "You'll need to reconnect to browse or download new comics. Anything already cached offline stays available.";
+    }
     $('disconnect-modal').classList.remove('hidden');
   });
   $('btn-cancel-disconnect-modal').addEventListener('click', () => {
@@ -3452,14 +3766,20 @@
   });
   $('btn-confirm-disconnect').addEventListener('click', () => {
     $('disconnect-modal').classList.add('hidden');
-    disconnectDrive();
+    disconnectCurrentSource();
   });
 
   $('btn-refresh').addEventListener('click', () => {
     $('btn-refresh').disabled = true;
     $('btn-refresh-icon').classList.add('spinning');
-    libraryFolderIdsCache = null;
-    Promise.all([loadNextUpShelf(), loadTBRShelf(), loadFavoritesShelf(), loadContinueReading(), loadOfflineShelf(), loadCurrentFolder()])
+    const reloads = [loadCurrentFolder()];
+    if (librarySource === 'local') {
+      localTreeCache = null;
+    } else {
+      libraryFolderIdsCache = null;
+      reloads.push(loadNextUpShelf(), loadTBRShelf(), loadFavoritesShelf(), loadContinueReading(), loadOfflineShelf());
+    }
+    Promise.all(reloads)
       .finally(() => {
         $('btn-refresh').disabled = false;
         $('btn-refresh-icon').classList.remove('spinning');
@@ -3502,8 +3822,14 @@
       setTimeout(() => { main.style.transition = ''; }, 200);
       if (pulledEnough && !refreshing) {
         refreshing = true;
-        libraryFolderIdsCache = null;
-        Promise.all([loadNextUpShelf(), loadTBRShelf(), loadFavoritesShelf(), loadContinueReading(), loadOfflineShelf(), loadCurrentFolder()])
+        const reloads = [loadCurrentFolder()];
+        if (librarySource === 'local') {
+          localTreeCache = null;
+        } else {
+          libraryFolderIdsCache = null;
+          reloads.push(loadNextUpShelf(), loadTBRShelf(), loadFavoritesShelf(), loadContinueReading(), loadOfflineShelf());
+        }
+        Promise.all(reloads)
           .finally(() => {
             refreshing = false;
             indicator.style.opacity = '0';
@@ -3575,6 +3901,23 @@
   });
 
   $('btn-connect').addEventListener('click', connectDrive);
+  $('btn-use-local').addEventListener('click', useLocalFolder);
+  $('btn-switch-source').addEventListener('click', () => {
+    if (librarySource === 'local') {
+      librarySource = 'drive';
+      localStorage.setItem(LIBRARY_SOURCE_KEY, 'drive');
+      document.body.classList.remove('local-mode');
+      localRootHandle = null;
+      localHandleCache = new Map();
+      localTreeCache = null;
+      popNav(1);
+      if (hasValidToken()) enterLibrary();
+      else showView('connect');
+    } else {
+      popNav(1);
+      showView('connect');
+    }
+  });
 
   $('btn-cancel-order-modal').addEventListener('click', closeOrderModal);
   $('order-modal').addEventListener('click', (e) => {
@@ -3616,10 +3959,12 @@
   if (NEEDS_SETUP) {
     $('setup-note').style.display = 'block';
   }
-  window.addEventListener('load', () => {
+  window.addEventListener('load', async () => {
     initGoogleAuth();
     flushProgressQueue();
-    if (hasValidToken()) {
+    if (await tryAutoResumeLocal()) {
+      enterLibrary();
+    } else if (hasValidToken()) {
       enterLibrary();
     } else {
       showView('connect');
