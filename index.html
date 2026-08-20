@@ -967,13 +967,21 @@
 
   // Builds a Drive-progressMap-shaped object out of the plain local
   // resume-position cache (see "Local comic cache" below) so
-  // buildItemRow's existing progress-bar/page-count rendering works on
-  // local rows with no extra plumbing.
-  function localProgressMap() {
+  // buildItemRow's existing progress-bar/page-count/finished-dimming
+  // rendering works on local rows with no extra plumbing. Also resolves
+  // each entry's cached cover thumbnail (see getLocalCoverUrl) so rows
+  // can show real cover art once a comic has been opened once.
+  async function localProgressMap() {
+    const list = loadCachedComics();
     const map = {};
-    loadCachedComics().forEach((c) => {
-      map[c.id] = { 'Last Page': c.lastPage, 'Total Pages': c.totalPages };
-    });
+    await Promise.all(list.map(async (c) => {
+      map[c.id] = {
+        'Last Page': c.lastPage,
+        'Total Pages': c.totalPages,
+        'Finished': !!c.finished,
+        localCoverUrl: await getLocalCoverUrl(c.id),
+      };
+    }));
     return map;
   }
 
@@ -1649,11 +1657,12 @@
     row.className = 'row';
     const isFolder = item.mimeType === 'application/vnd.google-apps.folder';
     const p = progressMap[item.id];
-    const cover = !isFolder && coverUrl(p);
+    const cover = !isFolder && (coverUrl(p) || (p && p.localCoverUrl));
     const isFavorite = isFolder ? favoriteFolderIds.has(item.id) : !!(p && p['Favorite']);
     const isTBR = isFolder ? (tbrFolderIds && tbrFolderIds.has(item.id)) : !!(p && p['Want To Read']);
     const isFinished = !isFolder && !!(p && p['Finished']);
     const isPinned = !isFolder && !!(findCachedComicMeta(item.id) && findCachedComicMeta(item.id).pinned);
+    const pinnedLabel = item.kind === 'file' ? 'Downloaded' : 'Downloaded for offline';
     if (isFinished) row.classList.add('row-finished');
     row.innerHTML = `
       <div class="icon">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="${escapeHtml(stripExt(item.name))}" />` : (isFolder ? '📁' : '📕')}</div>
@@ -1663,7 +1672,7 @@
           ${isFolder ? '' : `<span class="badge">${formatOf(item.name)}</span>`}
           ${isFavorite ? '<span class="status-badge" title="Favorite">★</span>' : ''}
           ${isTBR ? '<span class="status-badge" title="Want to read">🔖</span>' : ''}
-          ${isPinned ? '<span class="status-badge" title="Downloaded for offline">📌</span>' : ''}
+          ${isPinned ? `<span class="status-badge" title="${pinnedLabel}">📌</span>` : ''}
           ${p ? `<span>${p['Last Page'] || 0} / ${p['Total Pages'] || '?'} pages</span>` : ''}
         </div>
         ${p && p['Total Pages'] ? `<div class="progress-track"><div class="progress-fill" style="width:${Math.min(100, Math.round(100 * (p['Last Page'] || 0) / p['Total Pages']))}%"></div></div>` : ''}
@@ -3034,6 +3043,20 @@
     }
   }
 
+  // Local comics have no Airtable 'Finished' flag, so this local field is
+  // what localProgressMap() surfaces as 'Finished' — driving the same
+  // row-finished dimming Drive comics get. openComic() clears it when a
+  // finished comic is reopened, and closeReader() sets it again once the
+  // last page is reached.
+  function setLocalComicFinished(driveId, finished) {
+    const list = loadCachedComics();
+    const entry = list.find((c) => c.id === driveId);
+    if (entry && entry.finished !== finished) {
+      entry.finished = finished;
+      saveCachedComics(list);
+    }
+  }
+
   async function hasCachedComic(driveId) {
     if (!('caches' in window)) return false;
     try {
@@ -3259,6 +3282,19 @@
     } catch (e) { /* best effort */ }
   }
 
+  // Local-mode counterpart to generateAndUploadCover() — same downscale
+  // step, but caches to Cache Storage only (there's no Airtable record to
+  // upload to). Re-run on every open rather than checked-and-skipped: a
+  // Cache Storage put() is cheap, and this way a cache that got evicted
+  // under storage pressure self-heals the next time the comic is opened.
+  async function generateLocalCover(id, firstPageUrl) {
+    try {
+      const original = await fetch(firstPageUrl).then((r) => r.blob());
+      const thumb = await downscaleForCover(original);
+      if (thumb) await cacheCoverLocally(id, thumb);
+    } catch (e) { /* best effort — listing just keeps the placeholder icon */ }
+  }
+
   async function openComic(item) {
     pushNav();
     showView('reader');
@@ -3296,8 +3332,13 @@
       let resumeAt = 0;
       if (isLocal) {
         // No Airtable to resolve resume position or a cover against —
-        // just the plain local resume-position cache (see below).
-        recordCachedComicAccess(item);
+        // just the plain local resume-position cache (see below). Marking
+        // it pinned is what lights up the "Downloaded" badge in the
+        // library row (see buildItemRow) — every local comic is, by
+        // definition, already on-device once it's been opened.
+        recordCachedComicAccess(item, { pinned: true });
+        setLocalComicFinished(item.id, false); // re-reading a finished comic un-dims it until it's finished again
+        generateLocalCover(item.id, pages[0].url); // best-effort, not awaited — keeps opening the reader instant
         const cachedMeta = findCachedComicMeta(item.id);
         if (cachedMeta && typeof cachedMeta.lastPage === 'number') {
           resumeAt = Math.min(cachedMeta.lastPage, pages.length - 1);
@@ -3555,7 +3596,8 @@
       // Local comics have no Airtable 'Finished' flag to fall back on, so
       // their local resume-position entry (which is also what drives the
       // library row's progress bar — see localProgressMap()) is left in
-      // place at the last page instead of being evicted.
+      // place at the last page instead of being evicted; setLocalComicFinished
+      // is what dims the row (see buildItemRow's row-finished class).
       if (currentComic.kind !== 'file') {
         clearCachedComic(currentComic.id);
         saveProgress({
@@ -3563,6 +3605,8 @@
           'Finished': true,
           'Finished Date': todayISO(),
         });
+      } else {
+        setLocalComicFinished(currentComic.id, true);
       }
       let nextItem = null, nextContext = null;
       if (readNextContext && readNextContext.index >= 0 && readNextContext.index + 1 < readNextContext.items.length) {
