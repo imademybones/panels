@@ -60,7 +60,9 @@
      silently row by row. Favorites and "continue reading" are the two
      exceptions — reimplemented as plain local storage (see
      loadLocalFavorites/loadLocalContinueReading), so their controls
-     (.row-star, #filter-favorites, #continue-shelf-wrap) stay visible. */
+     (.row-star, #filter-favorites, #continue-shelf-wrap, #btn-stats) stay
+     visible — stats gets a lightweight local-only version instead of
+     Drive's month/year/streak breakdown (see renderLocalStats). */
   body.local-mode .row-menu,
   body.local-mode .row-download,
   body.local-mode #nextup-shelf-wrap,
@@ -69,7 +71,6 @@
   body.local-mode #offline-shelf-wrap,
   body.local-mode #streak-goal-card,
   body.local-mode #btn-orders,
-  body.local-mode #btn-stats,
   body.local-mode #settings-goal-section,
   body.local-mode #settings-library-root-section,
   body.local-mode #settings-cache-section{display:none !important;}
@@ -2263,9 +2264,49 @@
       .reduce((sum, e) => sum + (e.pagesRead || 0), 0);
   }
 
+  // Local-mode counterpart to the Drive stats grid — lightweight totals
+  // derived entirely from data already tracked locally: the
+  // resume-position cache (panelsCachedComics) for finished/in-progress/
+  // pages-read counts, and a recursive library scan (reusing
+  // buildLocalTree's own caching) for the total comic count. No
+  // month/year breakdown or streak here — those need a proper dated
+  // reading log, which local mode doesn't keep (see
+  // loadLocalContinueReading's comment on what does and doesn't have a
+  // local equivalent). "Pages read" is a running-total approximation
+  // (current bookmark position per comic, not a true historical tally),
+  // since that's what's actually available without adding new tracking.
+  async function renderLocalStats(grid) {
+    const cached = loadCachedComics();
+    const finished = cached.filter((c) => c.finished).length;
+    const inProgress = cached.filter((c) => !c.finished && (c.lastPage || 0) > 0).length;
+    const pagesRead = cached.reduce((sum, c) => sum + Math.min((c.lastPage || 0) + 1, c.totalPages || 0), 0);
+    let libraryTotal = null;
+    try { libraryTotal = (await buildLocalTree()).length; } catch (e) { /* best effort */ }
+
+    grid.innerHTML = `
+      <div class="stat-tile">
+        <div class="stat-value">${finished}</div>
+        <div class="stat-label">Comics finished</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-value">${inProgress}</div>
+        <div class="stat-label">In progress</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-value">${pagesRead}</div>
+        <div class="stat-label">Pages read</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-value">${libraryTotal === null ? '—' : libraryTotal}</div>
+        <div class="stat-label">Comics in library</div>
+      </div>
+    `;
+  }
+
   async function renderStats() {
     const grid = $('stats-grid');
     grid.innerHTML = '<div class="loading-state">Loading…</div>';
+    if (librarySource === 'local') { await renderLocalStats(grid); return; }
 
     const monthPrefix = todayISO().slice(0, 7); // YYYY-MM
     const yearPrefix = todayISO().slice(0, 4);  // YYYY
