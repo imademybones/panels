@@ -629,6 +629,18 @@
       <p class="modal-desc" id="settings-source-desc"></p>
       <button class="link-btn hidden" id="btn-change-local-folder">Change folder</button>
     </div>
+    <div class="settings-section hidden" id="settings-storage-section">
+      <div class="settings-label-row">
+        <div class="settings-label">Storage budget</div>
+        <button class="link-btn" id="btn-recalc-storage">Recalculate</button>
+      </div>
+      <div class="modal-new-row">
+        <input type="number" id="settings-storage-budget-input" min="1" inputmode="numeric" placeholder="GB budget (optional)" />
+        <button class="btn btn-outline" id="btn-save-storage-budget">Save</button>
+      </div>
+      <p class="modal-desc" id="settings-storage-desc"></p>
+      <div class="progress-track hidden" id="settings-storage-track"><div class="progress-fill" id="settings-storage-fill" style="width:0%"></div></div>
+    </div>
     <div class="settings-section" id="settings-library-root-section">
       <div class="settings-label-row">
         <div class="settings-label">Library folder <span id="settings-root-name"></span></div>
@@ -816,10 +828,13 @@
   const LOCAL_DB_NAME = 'panelsLocalLibrary';
   const LOCAL_DB_STORE = 'handles';
   const LOCAL_FAVORITES_KEY = 'panelsLocalFavorites';
+  const LOCAL_STORAGE_BUDGET_KEY = 'panelsLocalStorageBudgetGB';
+  const LOCAL_LIBRARY_SIZE_KEY = 'panelsLocalLibrarySize'; // {bytes, computedAt}
   let librarySource = localStorage.getItem(LIBRARY_SOURCE_KEY) || 'drive'; // 'drive' | 'local'
   let localRootHandle = null; // FileSystemDirectoryHandle
   let localHandleCache = new Map(); // relative path -> FileSystemDirectoryHandle | FileSystemFileHandle
   let localTreeCache = null; // flattened comic list under the root, built lazily for search
+  let localStorageBudgetGB = Number(localStorage.getItem(LOCAL_STORAGE_BUDGET_KEY)) || null; // user-set budget, GB
 
   // ---------------------------------------------------------------------
   // Small utilities
@@ -1064,6 +1079,52 @@
     return tree.filter((item) => item.name.toLowerCase().includes(q));
   }
 
+  function formatBytes(bytes) {
+    const gb = bytes / (1024 ** 3);
+    if (gb >= 1) return gb.toFixed(gb >= 10 ? 1 : 2) + ' GB';
+    return (bytes / (1024 ** 2)).toFixed(0) + ' MB';
+  }
+
+  function loadCachedLocalLibrarySize() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(LOCAL_LIBRARY_SIZE_KEY));
+      return raw && typeof raw.bytes === 'number' ? raw : null;
+    } catch (e) { return null; }
+  }
+
+  function clearCachedLocalLibrarySize() {
+    localStorage.removeItem(LOCAL_LIBRARY_SIZE_KEY);
+  }
+
+  // Walks the whole local tree reading each comic's real file size —
+  // separate from buildLocalTree()'s own walk (which deliberately skips
+  // size for listing speed — see listLocalFolder) since this is only
+  // ever run on demand from Settings, never automatically, given it has
+  // to open every file's metadata rather than just list names. Result is
+  // cached to localStorage (not just memory) so it survives a reload;
+  // the caller is responsible for clearing that cache when the folder
+  // changes (see pickNewLocalFolder/disconnectLocal).
+  async function computeLocalLibrarySize() {
+    if (!localRootHandle) return null;
+    let bytes = 0;
+    async function walk(dirHandle) {
+      for await (const [name, handle] of dirHandle.entries()) {
+        if (handle.kind === 'directory') {
+          await walk(handle);
+        } else if (isComicFile(name)) {
+          try {
+            const file = await handle.getFile();
+            bytes += file.size;
+          } catch (e) { /* skip unreadable entries — best effort */ }
+        }
+      }
+    }
+    await walk(localRootHandle);
+    const result = { bytes, computedAt: Date.now() };
+    localStorage.setItem(LOCAL_LIBRARY_SIZE_KEY, JSON.stringify(result));
+    return result;
+  }
+
   // Builds a Drive-progressMap-shaped object out of the plain local
   // resume-position cache (see "Local comic cache" below) so
   // buildItemRow's existing progress-bar/page-count/finished-dimming
@@ -1110,6 +1171,7 @@
         }
         handle = await window.showDirectoryPicker({ id: 'panels-library', mode: 'read' });
         await saveLocalRootHandle(handle);
+        clearCachedLocalLibrarySize(); // a freshly picked folder invalidates any previously measured size
       }
       localRootHandle = handle;
       localHandleCache = new Map([['', handle]]);
@@ -1168,6 +1230,7 @@
     try {
       const handle = await window.showDirectoryPicker({ id: 'panels-library', mode: 'read' });
       await saveLocalRootHandle(handle);
+      clearCachedLocalLibrarySize(); // a freshly picked folder invalidates any previously measured size
       localRootHandle = handle;
       localHandleCache = new Map([['', handle]]);
       localTreeCache = null;
@@ -2168,6 +2231,69 @@
     showToast('Daily goal updated.');
   }
 
+  // Fills in the storage-budget description/progress bar from whatever
+  // was last computed (see computeLocalLibrarySize) — never triggers a
+  // fresh scan itself, so opening Settings stays instant even on a large
+  // library. "Recalculate" is the only thing that actually walks the
+  // folder.
+  function renderStorageSettings() {
+    const cached = loadCachedLocalLibrarySize();
+    const track = $('settings-storage-track');
+    if (!cached) {
+      $('settings-storage-desc').textContent = localStorageBudgetGB
+        ? 'Not calculated yet — tap Recalculate to measure your comics folder against your ' + localStorageBudgetGB + ' GB budget.'
+        : 'Not calculated yet — tap Recalculate to measure your comics folder.';
+      track.classList.add('hidden');
+      return;
+    }
+    const usedLabel = formatBytes(cached.bytes);
+    const when = new Date(cached.computedAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    if (localStorageBudgetGB) {
+      const usedGB = cached.bytes / (1024 ** 3);
+      const pct = Math.round((usedGB / localStorageBudgetGB) * 100);
+      $('settings-storage-desc').textContent = usedLabel + ' of ' + localStorageBudgetGB + ' GB used (' + pct + '%) — as of ' + when + '.';
+      $('settings-storage-fill').style.width = Math.min(100, pct) + '%';
+      track.classList.remove('hidden');
+    } else {
+      $('settings-storage-desc').textContent = usedLabel + ' used — as of ' + when + '. Set a budget above to track it as a percentage.';
+      track.classList.add('hidden');
+    }
+  }
+
+  function saveStorageBudgetFromSettings() {
+    const raw = $('settings-storage-budget-input').value;
+    if (raw.trim() === '') {
+      localStorageBudgetGB = null;
+      localStorage.removeItem(LOCAL_STORAGE_BUDGET_KEY);
+      showToast('Storage budget cleared.');
+    } else {
+      const n = parseInt(raw, 10);
+      if (!Number.isFinite(n) || n <= 0) { showToast('Enter a positive number of GB, or leave it blank.'); return; }
+      localStorageBudgetGB = n;
+      localStorage.setItem(LOCAL_STORAGE_BUDGET_KEY, String(n));
+      showToast('Storage budget set to ' + n + ' GB.');
+    }
+    renderStorageSettings();
+  }
+
+  async function recalculateLocalStorage() {
+    const btn = $('btn-recalc-storage');
+    btn.disabled = true;
+    const prevLabel = btn.textContent;
+    btn.textContent = 'Calculating…';
+    $('settings-storage-desc').textContent = 'Reading your comics folder — this can take a moment for a large library…';
+    try {
+      await computeLocalLibrarySize();
+      renderStorageSettings();
+    } catch (e) {
+      showToast("Couldn't measure your comics folder.");
+      renderStorageSettings();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = prevLabel;
+    }
+  }
+
   // ---------------------------------------------------------------------
   // Settings screen — the single editable home for the daily goal (the
   // streak card's goal row just links here now, rather than duplicating
@@ -2225,12 +2351,16 @@
       $('settings-source-desc').textContent = 'Reading straight from files on this device — no Drive account, no network needed to browse or read.';
       $('btn-switch-source').textContent = 'Switch to Google Drive';
       $('btn-change-local-folder').classList.remove('hidden');
+      $('settings-storage-section').classList.remove('hidden');
+      $('settings-storage-budget-input').value = localStorageBudgetGB ? String(localStorageBudgetGB) : '';
+      renderStorageSettings();
       return;
     }
     $('settings-source-name').textContent = '(Google Drive)';
     $('settings-source-desc').textContent = 'Comics are streamed from your connected Drive account.';
     $('btn-switch-source').textContent = 'Use a local folder instead';
     $('btn-change-local-folder').classList.add('hidden');
+    $('settings-storage-section').classList.add('hidden');
     renderSettingsCache();
     if (libraryRoot) {
       $('settings-root-name').textContent = '(' + libraryRoot.name + ')';
@@ -4316,6 +4446,8 @@
   $('btn-settings').addEventListener('click', () => { pushNav(); showView('settings'); });
   $('btn-settings-back').addEventListener('click', () => { popNav(1); showView('library'); });
   $('btn-settings-save-goal').addEventListener('click', saveGoalFromSettings);
+  $('btn-save-storage-budget').addEventListener('click', saveStorageBudgetFromSettings);
+  $('btn-recalc-storage').addEventListener('click', recalculateLocalStorage);
   $('btn-reset-library-root').addEventListener('click', resetLibraryRoot);
   $('btn-clear-all-cache').addEventListener('click', () => {
     $('clear-cache-modal').classList.remove('hidden');
