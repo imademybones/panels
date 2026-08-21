@@ -57,22 +57,27 @@
   .connect-or{font-size:12px;color:var(--muted);margin:16px 0;text-transform:uppercase;letter-spacing:.05em;}
   /* Local-folder mode has no Drive/Airtable backing, so anything that
      reads or writes those services is hidden rather than left to fail
-     silently row by row. */
-  body.local-mode .row-star,
+     silently row by row. Favorites and "continue reading" are the two
+     exceptions — reimplemented as plain local storage (see
+     loadLocalFavorites/loadLocalContinueReading), so their controls
+     (.row-star, #filter-favorites, #continue-shelf-wrap) stay visible. */
   body.local-mode .row-menu,
   body.local-mode .row-download,
   body.local-mode #nextup-shelf-wrap,
   body.local-mode #tbr-shelf-wrap,
   body.local-mode #favorites-shelf-wrap,
-  body.local-mode #continue-shelf-wrap,
   body.local-mode #offline-shelf-wrap,
   body.local-mode #streak-goal-card,
   body.local-mode #btn-orders,
   body.local-mode #btn-stats,
-  body.local-mode #filter-favorites,
   body.local-mode #settings-goal-section,
   body.local-mode #settings-library-root-section,
   body.local-mode #settings-cache-section{display:none !important;}
+  body.local-mode #sort-select option[value="recent"]{display:none;}
+  /* Loading pulse for a local comic's placeholder icon while
+     applyLocalCovers() extracts its real cover in the background. */
+  .icon-pending{animation:icon-pulse 1.6s ease-in-out infinite;}
+  @keyframes icon-pulse{0%,100%{opacity:1;}50%{opacity:.35;}}
   .setup-note{
     margin-top:22px;font-size:12.5px;color:var(--muted);background:var(--accent-soft);
     border-radius:var(--radius-sm);padding:10px 14px;text-align:left;line-height:1.5;
@@ -621,6 +626,7 @@
         <button class="link-btn" id="btn-switch-source"></button>
       </div>
       <p class="modal-desc" id="settings-source-desc"></p>
+      <button class="link-btn hidden" id="btn-change-local-folder">Change folder</button>
     </div>
     <div class="settings-section" id="settings-library-root-section">
       <div class="settings-label-row">
@@ -798,13 +804,17 @@
   // folder/comic branching (buildItemRow, listFolder's filter, the AZ
   // rail, etc.) works on them unmodified; a 'kind' field ('file' or
   // 'directory') is what the local-specific code paths key off instead.
-  // Everything backed by Airtable (favorites, TBR, reading orders,
-  // stats, cross-device progress sync) has no local equivalent and is
-  // hidden via the body.local-mode CSS rules rather than half-ported.
+  // Favorites and "continue reading" are reimplemented as plain local
+  // storage (see loadLocalFavorites/loadLocalContinueReading below) since
+  // both are fully expressible without a server. Everything else backed
+  // by Airtable (TBR, reading orders, stats, cross-device progress sync)
+  // has no local equivalent and is hidden via the body.local-mode CSS
+  // rules rather than half-ported.
   // ---------------------------------------------------------------------
   const LIBRARY_SOURCE_KEY = 'panelsLibrarySource';
   const LOCAL_DB_NAME = 'panelsLocalLibrary';
   const LOCAL_DB_STORE = 'handles';
+  const LOCAL_FAVORITES_KEY = 'panelsLocalFavorites';
   let librarySource = localStorage.getItem(LIBRARY_SOURCE_KEY) || 'drive'; // 'drive' | 'local'
   let localRootHandle = null; // FileSystemDirectoryHandle
   let localHandleCache = new Map(); // relative path -> FileSystemDirectoryHandle | FileSystemFileHandle
@@ -943,6 +953,57 @@
     return base ? base + '/' + name : name;
   }
 
+  // Resolves any local id (a relative path) to its handle, walking down
+  // from the root through getDirectoryHandle() calls even if nothing in
+  // this session has listed that folder yet — unlike the plain
+  // localHandleCache lookup the rest of local mode uses, which only ever
+  // has entries for paths actually browsed or searched this session.
+  // This is what lets "Continue reading" and a restored breadcrumb trail
+  // (see restoreLocalCrumbs) work against a fresh page load. Every
+  // intermediate directory handle gets cached along the way, so a
+  // multi-level path only needs resolving once. Try file-then-directory
+  // for the last segment since callers don't know which one a given id
+  // is; a failed lookup means the item was renamed/moved/deleted since
+  // it was last seen, and the caller falls back accordingly.
+  async function resolveLocalHandle(path) {
+    if (localHandleCache.has(path)) return localHandleCache.get(path);
+    if (!localRootHandle) return null;
+    const parts = path.split('/').filter(Boolean);
+    if (parts.length === 0) return localRootHandle;
+    try {
+      let dir = localRootHandle;
+      for (let i = 0; i < parts.length - 1; i++) {
+        dir = await dir.getDirectoryHandle(parts[i]);
+        localHandleCache.set(parts.slice(0, i + 1).join('/'), dir);
+      }
+      const lastName = parts[parts.length - 1];
+      let handle;
+      try {
+        handle = await dir.getFileHandle(lastName);
+      } catch (e) {
+        handle = await dir.getDirectoryHandle(lastName);
+      }
+      localHandleCache.set(path, handle);
+      return handle;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Re-resolves the persisted breadcrumb trail's folder handles against
+  // the current root so relaunching the app (or reconnecting the same
+  // folder after a permission prompt) drops back into the same folder
+  // instead of always bouncing to the root. Leaves `crumbs` untouched
+  // either way — the caller resets it to just the root if this returns
+  // false, e.g. because a folder along the way was renamed or removed
+  // since the last session.
+  async function restoreLocalCrumbs() {
+    if (!crumbs.length || crumbs[0].id !== '') return false;
+    const deepest = crumbs[crumbs.length - 1];
+    if (deepest.id === '') return true;
+    return !!(await resolveLocalHandle(deepest.id));
+  }
+
   // Lists one local folder's immediate children — the local counterpart
   // to listFolder(). Folders get Drive's own folder mimeType sentinel so
   // every existing "is this a folder" check keeps working unmodified;
@@ -1032,12 +1093,14 @@
   async function useLocalFolder() {
     try {
       let handle = await loadLocalRootHandle();
+      let reusedStoredHandle = false;
       if (handle) {
         const perm = await handle.queryPermission({ mode: 'read' });
         if (perm !== 'granted') {
           const granted = await handle.requestPermission({ mode: 'read' });
           if (granted !== 'granted') handle = null;
         }
+        if (handle) reusedStoredHandle = true;
       }
       if (!handle) {
         if (!window.showDirectoryPicker) {
@@ -1052,9 +1115,15 @@
       localTreeCache = null;
       librarySource = 'local';
       localStorage.setItem(LIBRARY_SOURCE_KEY, 'local');
-      crumbs = [{ id: '', name: handle.name }];
-      saveCrumbs();
       document.body.classList.add('local-mode');
+      // Only worth trying to restore the old trail when this is the same
+      // remembered folder — a freshly picked one wouldn't have any paths
+      // in common with whatever was last browsed.
+      const restored = reusedStoredHandle && await restoreLocalCrumbs();
+      if (!restored) {
+        crumbs = [{ id: '', name: handle.name }];
+        saveCrumbs();
+      }
       enterLibrary();
     } catch (e) {
       if (e.name !== 'AbortError') showToast("Couldn't open that folder.");
@@ -1076,12 +1145,39 @@
       localRootHandle = handle;
       localHandleCache = new Map([['', handle]]);
       localTreeCache = null;
-      crumbs = [{ id: '', name: handle.name }];
-      saveCrumbs();
       document.body.classList.add('local-mode');
+      if (!(await restoreLocalCrumbs())) {
+        crumbs = [{ id: '', name: handle.name }];
+        saveCrumbs();
+      }
       return true;
     } catch (e) {
       return false;
+    }
+  }
+
+  // Forces a fresh directory picker regardless of the currently
+  // remembered folder — the "Change folder" action in Settings, distinct
+  // from useLocalFolder()'s try-the-old-one-first behavior.
+  async function pickNewLocalFolder() {
+    if (!window.showDirectoryPicker) {
+      showToast('Local folders need a Chromium browser (Chrome or Edge).');
+      return;
+    }
+    try {
+      const handle = await window.showDirectoryPicker({ id: 'panels-library', mode: 'read' });
+      await saveLocalRootHandle(handle);
+      localRootHandle = handle;
+      localHandleCache = new Map([['', handle]]);
+      localTreeCache = null;
+      crumbs = [{ id: '', name: handle.name }];
+      saveCrumbs();
+      popNav(1);
+      showView('library');
+      enterLibrary();
+      showToast('Switched to "' + handle.name + '".');
+    } catch (e) {
+      if (e.name !== 'AbortError') showToast("Couldn't open that folder.");
     }
   }
 
@@ -1284,6 +1380,15 @@
     renderBreadcrumb();
     if (librarySource === 'local') {
       $('account-indicator').textContent = localRootHandle ? localRootHandle.name : '';
+      // "Recently added" has no real dates to sort by in local mode (see
+      // listLocalFolder's createdTime:null) — silently a no-op, so treat
+      // a carried-over selection from Drive mode as "name" instead.
+      if (listSort === 'recent') {
+        listSort = 'name';
+        localStorage.setItem('panelsListSort', listSort);
+        $('sort-select').value = listSort;
+      }
+      loadLocalContinueReading();
       loadCurrentFolder();
       return;
     }
@@ -1696,14 +1801,22 @@
     const isFolder = item.mimeType === 'application/vnd.google-apps.folder';
     const p = progressMap[item.id];
     const cover = !isFolder && (coverUrl(p) || (p && p.localCoverUrl));
-    const isFavorite = isFolder ? favoriteFolderIds.has(item.id) : !!(p && p['Favorite']);
+    // Local mode has no folder/comic split for favorites — one flat set
+    // covers both (see loadLocalFavorites).
+    const isFavorite = librarySource === 'local'
+      ? favoriteFolderIds.has(item.id)
+      : (isFolder ? favoriteFolderIds.has(item.id) : !!(p && p['Favorite']));
     const isTBR = isFolder ? (tbrFolderIds && tbrFolderIds.has(item.id)) : !!(p && p['Want To Read']);
     const isFinished = !isFolder && !!(p && p['Finished']);
     const isPinned = !isFolder && !!(findCachedComicMeta(item.id) && findCachedComicMeta(item.id).pinned);
     const pinnedLabel = item.kind === 'file' ? 'Downloaded' : 'Downloaded for offline';
+    // Local-only: shows a loading pulse on the placeholder icon while
+    // applyLocalCovers() extracts a real cover in the background (see
+    // patchRowCover/stopIconPulse).
+    const iconPending = librarySource === 'local' && !isFolder && !cover;
     if (isFinished) row.classList.add('row-finished');
     row.innerHTML = `
-      <div class="icon">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="${escapeHtml(stripExt(item.name))}" />` : (isFolder ? '📁' : '📕')}</div>
+      <div class="icon${iconPending ? ' icon-pending' : ''}">${cover ? `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="${escapeHtml(stripExt(item.name))}" />` : (isFolder ? '📁' : '📕')}</div>
       <div class="info">
         <div class="name">${escapeHtml(isFolder ? item.name : stripExt(item.name))}</div>
         <div class="meta">
@@ -1731,7 +1844,8 @@
     });
     row.querySelector('.row-star').addEventListener('click', (e) => {
       e.stopPropagation();
-      if (isFolder) toggleFavoriteFolder(item, e.currentTarget);
+      if (librarySource === 'local') toggleLocalFavoriteRow(item, e.currentTarget);
+      else if (isFolder) toggleFavoriteFolder(item, e.currentTarget);
       else toggleFavoriteRow(item, e.currentTarget);
     });
     row.querySelector('.row-search').addEventListener('click', (e) => e.stopPropagation());
@@ -1830,6 +1944,7 @@
     let result = items;
     if (listFavoritesOnly) {
       result = result.filter((item) => {
+        if (librarySource === 'local') return favoriteFolderIds.has(item.id);
         const isFolder = item.mimeType === 'application/vnd.google-apps.folder';
         return isFolder
           ? favoriteFolderIds.has(item.id)
@@ -2108,11 +2223,13 @@
       $('settings-source-name').textContent = '(Local folder — ' + (localRootHandle ? localRootHandle.name : '…') + ')';
       $('settings-source-desc').textContent = 'Reading straight from files on this device — no Drive account, no network needed to browse or read.';
       $('btn-switch-source').textContent = 'Switch to Google Drive';
+      $('btn-change-local-folder').classList.remove('hidden');
       return;
     }
     $('settings-source-name').textContent = '(Google Drive)';
     $('settings-source-desc').textContent = 'Comics are streamed from your connected Drive account.';
     $('btn-switch-source').textContent = 'Use a local folder instead';
+    $('btn-change-local-folder').classList.add('hidden');
     renderSettingsCache();
     if (libraryRoot) {
       $('settings-root-name').textContent = '(' + libraryRoot.name + ')';
@@ -2213,7 +2330,7 @@
   }
 
   async function fetchFavoriteFolderIds() {
-    if (librarySource === 'local') return new Set();
+    if (librarySource === 'local') return loadLocalFavorites();
     try {
       const resp = await fetch(WORKER_URL + '/favoritefolders');
       if (!resp.ok) return new Set();
@@ -2374,6 +2491,57 @@
     } catch (e) {
       renderShelfError(wrap, loadContinueReading);
     }
+  }
+
+  // Local-mode counterpart to loadContinueReading() — built entirely
+  // from the local resume-position cache (panelsCachedComics), no
+  // network involved. Reuses the exact same shelf-card markup/CSS as
+  // Drive's version; only the data source and click/dismiss wiring
+  // differ (local ids resolve on demand via resolveLocalHandle, through
+  // openComic()).
+  function loadLocalContinueReading() {
+    const wrap = $('continue-shelf-wrap');
+    const records = loadCachedComics()
+      .filter((c) => c.totalPages && !c.finished && !c.dismissed)
+      .sort((a, b) => b.lastAccessedAt - a.lastAccessedAt)
+      .slice(0, 8);
+    if (records.length === 0) { wrap.innerHTML = ''; return; }
+    let html = '<div class="shelf-title">Continue reading</div><div class="shelf">';
+    records.forEach((meta) => {
+      const pct = meta.totalPages ? Math.min(100, Math.round(100 * (meta.lastPage || 0) / meta.totalPages)) : 0;
+      html += `
+        <div class="shelf-card" data-item-id="${escapeHtml(meta.id)}">
+          <button class="shelf-card-dismiss" aria-label="Remove from Continue reading">✕</button>
+          <div class="shelf-cover">📕</div>
+          <div class="shelf-card-body">
+            <div class="name">${escapeHtml(stripExt(meta.name))}</div>
+            <div class="meta">${meta.lastPage || 0} / ${meta.totalPages || '?'}</div>
+            <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
+          </div>
+        </div>`;
+    });
+    html += '</div>';
+    wrap.innerHTML = html;
+    wrap.querySelectorAll('.shelf-card').forEach((card) => {
+      const id = card.getAttribute('data-item-id');
+      getLocalCoverUrl(id).then((cover) => {
+        if (!cover) return;
+        const coverEl = card.querySelector('.shelf-cover');
+        coverEl.innerHTML = `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />`;
+        card.querySelector('.name').remove();
+      });
+      card.addEventListener('click', () => {
+        const meta = findCachedComicMeta(id);
+        readNextContext = null;
+        openComic({ id, name: meta ? meta.name : id, kind: 'file' });
+      });
+      card.querySelector('.shelf-card-dismiss').addEventListener('click', (e) => {
+        e.stopPropagation();
+        setLocalComicDismissed(id, true);
+        card.remove();
+        if (!wrap.querySelector('.shelf-card')) wrap.innerHTML = '';
+      });
+    });
   }
 
   // Formats a Next Up badge: "Mar 2024" for a real ComicVine date (visibly
@@ -2602,6 +2770,19 @@
       'Favorite': newVal,
     });
     loadFavoritesShelf();
+  }
+
+  // Local-mode counterpart, used for both comics and folders (see
+  // buildItemRow's isFavorite). Mutates lastListState.favoriteFolderIds
+  // directly rather than re-fetching it, so the re-render below reflects
+  // the toggle immediately.
+  function toggleLocalFavoriteRow(item, btn) {
+    const newVal = toggleLocalFavorite(item.id);
+    if (lastListState && lastListState.favoriteFolderIds) {
+      if (newVal) lastListState.favoriteFolderIds.add(item.id);
+      else lastListState.favoriteFolderIds.delete(item.id);
+    }
+    renderFolderList();
   }
 
   function toggleTBRRow(item, btn) {
@@ -3070,11 +3251,25 @@
     if (existing) {
       existing.lastAccessedAt = Date.now();
       existing.name = item.name;
+      existing.dismissed = false; // reopening un-dismisses it from "Continue reading" (local mode only)
       if (opts && opts.pinned) existing.pinned = true;
     } else {
-      list.push({ id: item.id, name: item.name, lastPage: 0, totalPages: 0, lastAccessedAt: Date.now(), pinned: !!(opts && opts.pinned) });
+      list.push({ id: item.id, name: item.name, lastPage: 0, totalPages: 0, lastAccessedAt: Date.now(), pinned: !!(opts && opts.pinned), dismissed: false });
     }
     saveCachedComics(list);
+  }
+
+  // "Continue reading" dismiss, local-mode counterpart to Drive's
+  // Progress['Dismissed'] flag — hides it from loadLocalContinueReading()
+  // without touching its resume position, so reopening it from its
+  // actual folder still picks up right where it left off.
+  function setLocalComicDismissed(driveId, dismissed) {
+    const list = loadCachedComics();
+    const entry = list.find((c) => c.id === driveId);
+    if (entry) {
+      entry.dismissed = dismissed;
+      saveCachedComics(list);
+    }
   }
 
   // Updates a cached comic's known progress, but only if it still has a
@@ -3101,6 +3296,32 @@
       entry.finished = finished;
       saveCachedComics(list);
     }
+  }
+
+  // Local favorites — a flat set of ids covering both comics and folders
+  // (Drive splits these across a Progress-row field and a separate
+  // favoritefolders table; local mode has no equivalent split to
+  // maintain, so one set does both jobs). fetchFavoriteFolderIds()
+  // returns this directly for local mode, and buildItemRow/
+  // applySortFilter check it for every row regardless of isFolder.
+  function loadLocalFavorites() {
+    try {
+      const arr = JSON.parse(localStorage.getItem(LOCAL_FAVORITES_KEY));
+      return new Set(Array.isArray(arr) ? arr : []);
+    } catch (e) { return new Set(); }
+  }
+
+  function saveLocalFavorites(set) {
+    localStorage.setItem(LOCAL_FAVORITES_KEY, JSON.stringify([...set]));
+  }
+
+  // Toggles and returns the new state, so callers don't need a separate
+  // read-then-write.
+  function toggleLocalFavorite(id) {
+    const set = loadLocalFavorites();
+    if (set.has(id)) set.delete(id); else set.add(id);
+    saveLocalFavorites(set);
+    return set.has(id);
   }
 
   async function hasCachedComic(driveId) {
@@ -3350,7 +3571,7 @@
   // config), so it doesn't block the UI thread either way.
   async function ensureLocalCover(item) {
     if (await getLocalCoverUrl(item.id)) return; // already have one — don't re-decompress
-    const handle = localHandleCache.get(item.id);
+    const handle = await resolveLocalHandle(item.id);
     if (!handle) return;
     const file = await handle.getFile();
     const buffer = await file.arrayBuffer();
@@ -3372,7 +3593,22 @@
       const icon = row.querySelector('.icon');
       if (icon && !icon.querySelector('img')) {
         icon.innerHTML = `<img class="cover-thumb" src="${escapeHtml(url)}" alt="" />`;
+        icon.classList.remove('icon-pending');
       }
+      break;
+    }
+  }
+
+  // Stops a row's loading pulse without a cover — either extraction
+  // failed (encrypted/corrupt archive, moved file) or the archive
+  // genuinely has no readable image pages. Keeping icon-pending forever
+  // in that case would read as "still loading" indefinitely instead of
+  // "this one just doesn't have a cover."
+  function stopIconPulse(itemId) {
+    for (const row of document.querySelectorAll('#folder-list .row')) {
+      if (row.getAttribute('data-item-id') !== itemId) continue;
+      const icon = row.querySelector('.icon');
+      if (icon) icon.classList.remove('icon-pending');
       break;
     }
   }
@@ -3394,7 +3630,10 @@
           await ensureLocalCover(item);
           const url = await getLocalCoverUrl(item.id);
           if (url) patchRowCover(item.id, url);
-        } catch (e) { /* best effort — that row just keeps its placeholder icon */ }
+          else stopIconPulse(item.id);
+        } catch (e) {
+          stopIconPulse(item.id); // best effort — that row just keeps its placeholder icon
+        }
       }
     }
     await Promise.all(Array.from({ length: Math.min(LOCAL_COVER_CONCURRENCY, files.length) }, worker));
@@ -3414,7 +3653,7 @@
     try {
       let buffer;
       if (isLocal) {
-        const handle = localHandleCache.get(item.id);
+        const handle = await resolveLocalHandle(item.id);
         if (!handle) throw new Error("That comic isn't available — try reopening your local library.");
         const file = await handle.getFile();
         buffer = await file.arrayBuffer();
@@ -3730,6 +3969,7 @@
     // updated progress.
     if (librarySource === 'local') {
       showView('library');
+      loadLocalContinueReading();
       loadCurrentFolder();
     } else if (hasValidToken()) {
       showView('library');
@@ -3924,6 +4164,7 @@
     const reloads = [loadCurrentFolder()];
     if (librarySource === 'local') {
       localTreeCache = null;
+      loadLocalContinueReading();
     } else {
       libraryFolderIdsCache = null;
       reloads.push(loadNextUpShelf(), loadTBRShelf(), loadFavoritesShelf(), loadContinueReading(), loadOfflineShelf());
@@ -3974,6 +4215,7 @@
         const reloads = [loadCurrentFolder()];
         if (librarySource === 'local') {
           localTreeCache = null;
+          loadLocalContinueReading();
         } else {
           libraryFolderIdsCache = null;
           reloads.push(loadNextUpShelf(), loadTBRShelf(), loadFavoritesShelf(), loadContinueReading(), loadOfflineShelf());
@@ -4073,6 +4315,7 @@
       showView('connect');
     }
   });
+  $('btn-change-local-folder').addEventListener('click', pickNewLocalFolder);
 
   $('btn-cancel-order-modal').addEventListener('click', closeOrderModal);
   $('order-modal').addEventListener('click', (e) => {
