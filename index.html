@@ -329,6 +329,42 @@
     cursor:pointer;padding:6px 10px;flex-shrink:0;transition:transform .12s ease;
   }
   .row-menu:active{transform:scale(0.8);}
+  /* Grid view — same .row markup, just reflowed into a poster tile via
+     CSS so buildItemRow() doesn't need a second rendering path. The
+     format badge and plain page-count text are dropped (the cover +
+     progress bar already carry that) to keep tiles clean; star/menu
+     become small overlays on the cover corner. */
+  #folder-list.grid-view{
+    display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));
+    gap:20px 12px;padding-top:6px;
+  }
+  #folder-list.grid-view .row{
+    flex-direction:column;align-items:stretch;padding:0;border-bottom:none;
+    gap:0;position:relative;
+  }
+  #folder-list.grid-view .row:active{background:none;}
+  #folder-list.grid-view .row .icon{
+    width:100%;aspect-ratio:2/3;font-size:38px;border-radius:10px;
+    background:var(--surface);display:flex;align-items:center;justify-content:center;
+    overflow:hidden;
+  }
+  #folder-list.grid-view .row .icon img.cover-thumb{
+    width:100%;height:100%;border-radius:10px;
+  }
+  #folder-list.grid-view .row .info{margin-top:8px;flex:none;}
+  #folder-list.grid-view .row .name{
+    white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    overflow:hidden;font-size:12.5px;line-height:1.3;
+  }
+  #folder-list.grid-view .row .meta{margin-top:4px;flex-wrap:wrap;}
+  #folder-list.grid-view .row .meta .badge,
+  #folder-list.grid-view .row .meta .page-count{display:none;}
+  #folder-list.grid-view .row-star,
+  #folder-list.grid-view .row-menu{
+    position:absolute;top:4px;background:rgba(0,0,0,.45);border-radius:999px;color:#fff;
+  }
+  #folder-list.grid-view .row-star{right:4px;}
+  #folder-list.grid-view .row-menu{right:32px;}
   .row-action-item{
     background:none;border:none;width:100%;text-align:left;font:inherit;color:inherit;
     text-decoration:none;
@@ -526,6 +562,7 @@
         <option value="unread">Unread first</option>
       </select>
       <button class="filter-chip" id="filter-favorites">★ Favorites</button>
+      <button class="link-btn" id="btn-view-toggle">⊞ Grid</button>
     </div>
   </div>
 
@@ -1655,6 +1692,7 @@
   function buildItemRow(item, progressMap, favoriteFolderIds, openFolderFn, tbrFolderIds) {
     const row = document.createElement('div');
     row.className = 'row';
+    row.setAttribute('data-item-id', item.id);
     const isFolder = item.mimeType === 'application/vnd.google-apps.folder';
     const p = progressMap[item.id];
     const cover = !isFolder && (coverUrl(p) || (p && p.localCoverUrl));
@@ -1673,7 +1711,7 @@
           ${isFavorite ? '<span class="status-badge" title="Favorite">★</span>' : ''}
           ${isTBR ? '<span class="status-badge" title="Want to read">🔖</span>' : ''}
           ${isPinned ? `<span class="status-badge" title="${pinnedLabel}">📌</span>` : ''}
-          ${p ? `<span>${p['Last Page'] || 0} / ${p['Total Pages'] || '?'} pages</span>` : ''}
+          ${p ? `<span class="page-count">${p['Last Page'] || 0} / ${p['Total Pages'] || '?'} pages</span>` : ''}
         </div>
         ${p && p['Total Pages'] ? `<div class="progress-track"><div class="progress-fill" style="width:${Math.min(100, Math.round(100 * (p['Last Page'] || 0) / p['Total Pages']))}%"></div></div>` : ''}
       </div>
@@ -1773,6 +1811,12 @@
   // ---------------------------------------------------------------------
   let listSort = localStorage.getItem('panelsListSort') || 'name';
   let listFavoritesOnly = localStorage.getItem('panelsListFavoritesOnly') === '1';
+  let listViewMode = localStorage.getItem('panelsListView') || 'list'; // 'list' | 'grid'
+
+  function applyListViewMode() {
+    $('folder-list').classList.toggle('grid-view', listViewMode === 'grid');
+    $('btn-view-toggle').textContent = listViewMode === 'grid' ? '☰ List' : '⊞ Grid';
+  }
   let lastListState = null; // { items, progressMap, favoriteFolderIds, openFolderFn, emptyMessage, tbrFolderIds }
 
   // Comics currently visible in folder-list, in display order — read
@@ -1840,6 +1884,7 @@
       const [progressMap, favoriteFolderIds, tbrFolderIds] = await Promise.all([fetchProgressMap(), fetchFavoriteFolderIds(), fetchTBRFolderIds()]);
       lastListState = { items, progressMap, favoriteFolderIds, openFolderFn: openFolder, emptyMessage: 'No folders or comics (.cbz/.cbr) here.', tbrFolderIds };
       renderFolderList();
+      if (librarySource === 'local') applyLocalCovers(items); // background — fills in real covers without blocking this render
     } catch (err) {
       list.innerHTML = '<div class="empty-state">' + escapeHtml(err.message || 'Something went wrong.') + '</div>';
     }
@@ -1859,6 +1904,7 @@
       const [progressMap, favoriteFolderIds, tbrFolderIds] = await Promise.all([fetchProgressMap(), fetchFavoriteFolderIds(), fetchTBRFolderIds()]);
       lastListState = { items, progressMap, favoriteFolderIds, openFolderFn: openFolderDirect, emptyMessage: 'No matches for "' + query + '".', tbrFolderIds };
       renderFolderList();
+      if (librarySource === 'local') applyLocalCovers(items); // background — fills in real covers without blocking this render
     } catch (err) {
       list.innerHTML = '<div class="empty-state">' + escapeHtml(err.message || 'Something went wrong.') + '</div>';
     }
@@ -3295,6 +3341,65 @@
     } catch (e) { /* best effort — listing just keeps the placeholder icon */ }
   }
 
+  // Pulls a comic's cover straight from the archive without the reader
+  // ever opening — unpacks the whole file (same extractPages() path
+  // openComic() uses) just to grab page one, then throws the rest away.
+  // Wasteful compared to reading only the first entry, but it reuses the
+  // one archive-reading code path that's actually been exercised, and
+  // extraction runs in a Worker (see the libarchive.js Archive.init()
+  // config), so it doesn't block the UI thread either way.
+  async function ensureLocalCover(item) {
+    if (await getLocalCoverUrl(item.id)) return; // already have one — don't re-decompress
+    const handle = localHandleCache.get(item.id);
+    if (!handle) return;
+    const file = await handle.getFile();
+    const buffer = await file.arrayBuffer();
+    const pages = await window.ComicArchive.extractPages(buffer, item.name);
+    try {
+      await generateLocalCover(item.id, pages[0].url);
+    } finally {
+      pages.forEach((p) => URL.revokeObjectURL(p.url));
+    }
+  }
+
+  // Swaps a rendered row's placeholder icon for a real cover image once
+  // one becomes available — used once at initial render (via
+  // localProgressMap's localCoverUrl) and again here as covers land
+  // asynchronously, without waiting on a full folder-list re-render.
+  function patchRowCover(itemId, url) {
+    for (const row of document.querySelectorAll('#folder-list .row')) {
+      if (row.getAttribute('data-item-id') !== itemId) continue;
+      const icon = row.querySelector('.icon');
+      if (icon && !icon.querySelector('img')) {
+        icon.innerHTML = `<img class="cover-thumb" src="${escapeHtml(url)}" alt="" />`;
+      }
+      break;
+    }
+  }
+
+  // Fills in real cover art for whatever local comics are currently on
+  // screen, a few at a time in the background — folder listings render
+  // instantly either way (see loadCurrentFolder()/runSearch()), covers
+  // just appear a moment later as each one finishes. Never touches
+  // folders or comics outside the current view, so opening a folder with
+  // hundreds of issues doesn't kick off hundreds of extractions at once.
+  const LOCAL_COVER_CONCURRENCY = 3;
+  async function applyLocalCovers(items) {
+    const files = items.filter((it) => it.kind === 'file');
+    let idx = 0;
+    async function worker() {
+      while (idx < files.length) {
+        const item = files[idx++];
+        try {
+          await ensureLocalCover(item);
+          const url = await getLocalCoverUrl(item.id);
+          if (url) patchRowCover(item.id, url);
+        } catch (e) { /* best effort — that row just keeps its placeholder icon */ }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(LOCAL_COVER_CONCURRENCY, files.length) }, worker));
+  }
+
   async function openComic(item) {
     pushNav();
     showView('reader');
@@ -3899,6 +4004,12 @@
     localStorage.setItem('panelsListFavoritesOnly', listFavoritesOnly ? '1' : '0');
     $('filter-favorites').classList.toggle('active', listFavoritesOnly);
     renderFolderList();
+  });
+  applyListViewMode();
+  $('btn-view-toggle').addEventListener('click', () => {
+    listViewMode = listViewMode === 'grid' ? 'list' : 'grid';
+    localStorage.setItem('panelsListView', listViewMode);
+    applyListViewMode();
   });
 
   let searchDebounce = null;
