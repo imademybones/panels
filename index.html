@@ -2252,6 +2252,8 @@
       if (librarySource === 'local') {
         applyLocalCovers(items); // background — fills in real covers without blocking this render
         applyRemoteLocalProgress(items); // background — positions read on other devices
+      } else {
+        applyCachedCovers(items); // background — on-device covers for comics opened before
       }
     } catch (err) {
       list.innerHTML = '<div class="empty-state">' + escapeHtml(err.message || 'Something went wrong.') + '</div>';
@@ -2275,6 +2277,8 @@
       if (librarySource === 'local') {
         applyLocalCovers(items); // background — fills in real covers without blocking this render
         applyRemoteLocalProgress(items); // background — positions read on other devices
+      } else {
+        applyCachedCovers(items); // background — on-device covers for comics opened before
       }
     } catch (err) {
       list.innerHTML = '<div class="empty-state">' + escapeHtml(err.message || 'Something went wrong.') + '</div>';
@@ -2898,6 +2902,7 @@
       });
       html += '</div>';
       wrap.innerHTML = html;
+      applyCachedShelfCovers(wrap);
       wrap.querySelectorAll('.shelf-card').forEach(card => {
         card.addEventListener('click', async () => {
           const id = card.getAttribute('data-drive-id');
@@ -3114,6 +3119,7 @@
       });
       html += '</div>';
       wrap.innerHTML = html;
+      applyCachedShelfCovers(wrap);
       wrap.querySelectorAll('.shelf-card').forEach((card) => {
         const id = card.getAttribute('data-drive-id');
         const type = card.getAttribute('data-type');
@@ -3180,6 +3186,7 @@
       });
       html += '</div>';
       wrap.innerHTML = html;
+      applyCachedShelfCovers(wrap);
       wrap.querySelectorAll('.shelf-card').forEach((card) => {
         const id = card.getAttribute('data-drive-id');
         const type = card.getAttribute('data-type');
@@ -3725,10 +3732,12 @@
   // offline" on the connect screen when there's no Drive token (expired,
   // or genuinely no connectivity to reach Google at all).
   //
-  // Cover thumbnails are cached alongside the bytes in a separate bucket
-  // (COVER_CACHE_NAME) so the offline picker can show real cover art
-  // with no network dependency either — see generateAndUploadCover() and
-  // the cacheCoverFromUrl() call in openComic().
+  // Cover thumbnails live in a separate bucket (COVER_CACHE_NAME), the
+  // only copy of a cover in both modes (see generateLocalCover() and the
+  // cacheCoverFromUrl() call in openComic()). They're deliberately kept
+  // when a comic's bytes are evicted or finished, since folder listings
+  // and shelves still show them; at ~50–100KB each they're cheap next to
+  // the comics themselves.
   // -------------------------------------------------------------------
   const CACHED_COMICS_KEY = 'panelsCachedComics';
 
@@ -3877,14 +3886,6 @@
     } catch (e) { return null; }
   }
 
-  async function clearLocalCover(driveId) {
-    if (!('caches' in window)) return;
-    try {
-      const cache = await caches.open(COVER_CACHE_NAME);
-      await cache.delete(coverCacheKey(driveId));
-    } catch (e) { /* best effort */ }
-  }
-
   // Drops the least-recently-accessed comics (bytes + cover) once either
   // bucket is over its cap. Pinned downloads (deliberate "read this on
   // the train" picks) and the plain incidental reading cache are kept
@@ -3914,7 +3915,6 @@
         await Promise.all(evict.map((e) => cache.delete(comicCacheKey(e.id))));
       } catch (e) { /* best effort */ }
     }
-    evict.forEach((e) => clearLocalCover(e.id));
     saveCachedComics(keep);
   }
 
@@ -3945,7 +3945,6 @@
 
   async function clearCachedComic(driveId) {
     saveCachedComics(loadCachedComics().filter((c) => c.id !== driveId));
-    clearLocalCover(driveId);
     if (!('caches' in window)) return;
     try {
       const cache = await caches.open(COMIC_CACHE_NAME);
@@ -3992,11 +3991,9 @@
   }
 
   // -------------------------------------------------------------------
-  // Auto cover thumbnail — the first time a comic is opened, downscale
-  // its first page and upload it to Airtable's Cover attachment field,
-  // so folder/shelf listings can show a real thumbnail instead of a
-  // placeholder icon. Best-effort and non-blocking; skipped once a
-  // cover already exists for this file.
+  // Cover thumbnails — a comic's first page, downscaled, kept on this
+  // device only (see generateLocalCover) so folder/shelf listings can
+  // show real art instead of a placeholder icon.
   // -------------------------------------------------------------------
   async function downscaleForCover(blob) {
     const bitmap = await createImageBitmap(blob);
@@ -4011,21 +4008,11 @@
     return await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
   }
 
-  function blobToBase64(blob) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onloadend = () => resolve(reader.result.split(',')[1]);
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
-  }
-
   // Creates (or leaves untouched) the Progress row for this file through
   // the same upsert-by-Drive-File-ID route every other write uses — the
   // only code path in the whole app allowed to create a row. Awaited
-  // before a cover upload is attempted, so the cover route (which only
-  // ever looks a row up, never creates one) reliably finds it instead of
-  // two independent paths racing to create duplicate rows.
+  // before any progress save goes out, so two independent writes can't
+  // race to create duplicate rows.
   async function ensureProgressRow(item) {
     try {
       const resp = await fetch(WORKER_URL + '/progress', {
@@ -4041,24 +4028,9 @@
     } catch (e) { return false; }
   }
 
-  async function generateAndUploadCover(driveId, firstPageUrl) {
-    try {
-      const original = await fetch(firstPageUrl).then((r) => r.blob());
-      const thumb = await downscaleForCover(original);
-      if (!thumb) return;
-      cacheCoverLocally(driveId, thumb); // local copy for the offline picker, independent of the upload below
-      const base64 = await blobToBase64(thumb);
-      await fetch(WORKER_URL + '/progress/cover', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ driveId, contentType: 'image/jpeg', file: base64, filename: 'cover.jpg' }),
-      });
-    } catch (e) { /* best effort — listing just keeps the placeholder icon */ }
-  }
-
-  // Mirrors an already-existing cover (fetched from Airtable) into the
-  // local cover cache, so a comic that already had a cover before this
-  // device ever opened it still shows real art in the offline picker.
+  // Mirrors a cover uploaded to Airtable by an older version of Panels
+  // into the local cover cache, so it keeps showing in listings and the
+  // offline picker. Panels no longer uploads covers anywhere.
   async function cacheCoverFromUrl(driveId, url) {
     if (!url) return;
     try {
@@ -4067,9 +4039,10 @@
     } catch (e) { /* best effort */ }
   }
 
-  // Local-mode counterpart to generateAndUploadCover() — same downscale
-  // step, but caches to Cache Storage only (there's no Airtable record to
-  // upload to). Re-run on every open rather than checked-and-skipped: a
+  // Downscales a comic's first page and keeps it on this device only, in
+  // both Drive and local mode — covers used to be uploaded to Airtable in
+  // Drive mode, but one attachment row per comic quickly ran the base
+  // into its record limit. Re-run on every open rather than checked-and-skipped: a
   // Cache Storage put() is cheap, and this way a cache that got evicted
   // under storage pressure self-heals the next time the comic is opened.
   async function generateLocalCover(id, firstPageUrl) {
@@ -4099,6 +4072,30 @@
     } finally {
       pages.forEach((p) => URL.revokeObjectURL(p.url));
     }
+  }
+
+  // Drive mode: rows render with whatever cover Airtable still has (older
+  // uploads), then this fills in on-device covers for the rest. No
+  // extraction here — a Drive comic only gets a cover once it's opened.
+  async function applyCachedCovers(items) {
+    await Promise.all(items.filter((it) => it.mimeType !== 'application/vnd.google-apps.folder').map(async (item) => {
+      const url = await getLocalCoverUrl(item.id);
+      if (url) patchRowCover(item.id, url);
+    }));
+  }
+
+  // Same for shelf cards (Continue reading, Favorites, Want to read):
+  // any card still showing a placeholder gets its on-device cover.
+  function applyCachedShelfCovers(wrap) {
+    wrap.querySelectorAll('.shelf-card[data-drive-id]').forEach(async (card) => {
+      const coverEl = card.querySelector('.shelf-cover');
+      if (!coverEl || coverEl.querySelector('img')) return;
+      const url = await getLocalCoverUrl(card.getAttribute('data-drive-id'));
+      if (!url || !card.isConnected) return;
+      coverEl.innerHTML = `<img class="cover-thumb" src="${escapeHtml(url)}" alt="" />`;
+      const name = card.querySelector('.shelf-card-body .name');
+      if (name) name.remove();
+    });
   }
 
   // Swaps a rendered row's placeholder icon for a real cover image once
@@ -4254,15 +4251,11 @@
           await ensureProgressRow(item);
         }
 
-        // Cover handling stays best-effort/non-blocking — it doesn't affect
-        // row creation, so no need to await it before rendering.
-        if (reachedWorker) {
-          if (!rec || !rec.fields['Cover']) {
-            generateAndUploadCover(item.id, pages[0].url);
-          } else {
-            cacheCoverFromUrl(item.id, coverUrl(rec.fields));
-          }
-        }
+        // Covers stay on this device (see generateLocalCover) — best-effort
+        // and non-blocking. A cover an older version already uploaded is
+        // reused rather than regenerated.
+        if (rec && rec.fields['Cover']) cacheCoverFromUrl(item.id, coverUrl(rec.fields));
+        else generateLocalCover(item.id, pages[0].url);
 
         if (!reachedWorker) {
           const cachedMeta = findCachedComicMeta(item.id);
@@ -4297,7 +4290,6 @@
     const buffer = await getCachedComicBuffer(meta.id);
     if (!buffer) {
       saveCachedComics(loadCachedComics().filter((c) => c.id !== driveId));
-      clearLocalCover(driveId);
       renderOfflineConnectOption();
       showToast("That comic isn't available offline anymore.");
       return;
