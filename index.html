@@ -1151,7 +1151,12 @@
   // newer by definition.
   // ---------------------------------------------------------------------
   const LOCAL_SYNC_PREFIX = 'local:';
-  const LOCAL_SYNC_TIMEOUT_MS = 3000;
+  const LOCAL_SYNC_TIMEOUT_MS = 3000; // single-comic lookups (opening a comic)
+  // The full synced-row list pages through Airtable 100 rows at a time on
+  // the Worker side, so it gets far longer — nothing waits on it (shelves
+  // and listings render from local data first and fill in after).
+  const LOCAL_SYNC_LIST_TIMEOUT_MS = 20000;
+  const LOCAL_SYNC_LIST_CACHE_MS = 30000;
 
   function isLocalSyncId(id) {
     return typeof id === 'string' && id.startsWith(LOCAL_SYNC_PREFIX);
@@ -1176,18 +1181,63 @@
 
   // Every synced local-comic row, as a Map of sync key -> fields, or null
   // when the Worker can't be reached (callers then fall back to purely
-  // local data, exactly as before sync existed).
-  async function fetchRemoteLocalProgress() {
-    try {
-      const resp = await fetchWithTimeout(WORKER_URL + '/progress', LOCAL_SYNC_TIMEOUT_MS);
-      if (!resp.ok) return null;
-      const data = await resp.json();
-      const map = new Map();
-      (data.records || []).forEach((r) => {
-        if (isLocalSyncId(r.fields['Drive File ID'])) map.set(r.fields['Drive File ID'], r.fields);
-      });
-      return map;
-    } catch (e) { return null; }
+  // local data, exactly as before sync existed). ?prefix= asks the Worker
+  // to filter to local rows in Airtable itself; an older Worker ignores
+  // it and returns the whole table, which the isLocalSyncId filter below
+  // still copes with, just more slowly. One request is shared by the
+  // shelf, the folder listing and Settings for a short while, and
+  // dropped as soon as this device queues a write of its own (see
+  // queuePendingProgress) so a stale copy never overrides it.
+  let remoteLocalProgressCache = null; // { at, promise }
+  function fetchRemoteLocalProgress() {
+    if (remoteLocalProgressCache && Date.now() - remoteLocalProgressCache.at < LOCAL_SYNC_LIST_CACHE_MS) {
+      return remoteLocalProgressCache.promise;
+    }
+    const promise = (async () => {
+      try {
+        const resp = await fetchWithTimeout(WORKER_URL + '/progress?prefix=' + encodeURIComponent(LOCAL_SYNC_PREFIX), LOCAL_SYNC_LIST_TIMEOUT_MS);
+        if (!resp.ok) return null;
+        const data = await resp.json();
+        const map = new Map();
+        (data.records || []).forEach((r) => {
+          if (isLocalSyncId(r.fields['Drive File ID'])) map.set(r.fields['Drive File ID'], r.fields);
+        });
+        return map;
+      } catch (e) { return null; }
+    })();
+    const entry = { at: Date.now(), promise };
+    remoteLocalProgressCache = entry;
+    promise.then((map) => { if (!map && remoteLocalProgressCache === entry) remoteLocalProgressCache = null; });
+    return promise;
+  }
+
+  // Background counterpart to a local folder/search render: once synced
+  // rows arrive, swaps in fresh rows for just the comics whose position
+  // came from another device, leaving everything else (covers already
+  // patched in, scroll position) untouched.
+  async function applyRemoteLocalProgress(items) {
+    const remote = await fetchRemoteLocalProgress();
+    if (!remote || !lastListState || lastListState.items !== items) return;
+    const { progressMap, favoriteFolderIds, openFolderFn, tbrFolderIds } = lastListState;
+    const pending = loadProgressQueue();
+    items.forEach((item) => {
+      if (item.kind !== 'file') return;
+      const key = localSyncId(item.id);
+      const r = remoteProgressToUse(remote.get(key), key, pending);
+      if (!r) return;
+      const prev = progressMap[item.id] || {};
+      if (prev['Last Page'] === r['Last Page'] && prev['Total Pages'] === r['Total Pages'] && !!prev['Finished'] === !!r['Finished']) return;
+      progressMap[item.id] = { ...prev, 'Last Page': r['Last Page'], 'Total Pages': r['Total Pages'], 'Finished': !!r['Finished'] };
+      const old = [...document.querySelectorAll('#folder-list .row')].find((row) => row.getAttribute('data-item-id') === item.id);
+      if (!old) return;
+      const oldIcon = old.querySelector('.icon');
+      const coverImg = oldIcon && oldIcon.querySelector('img');
+      const fresh = buildItemRow(item, progressMap, favoriteFolderIds, openFolderFn, tbrFolderIds);
+      fresh.setAttribute('data-first-letter', old.getAttribute('data-first-letter') || '');
+      old.replaceWith(fresh);
+      if (coverImg) patchRowCover(item.id, coverImg.src);
+      else if (oldIcon && !oldIcon.classList.contains('icon-pending')) stopIconPulse(item.id);
+    });
   }
 
   // The remote row to trust for this comic, or null if local should win
@@ -2147,10 +2197,13 @@
         list.innerHTML = '<div class="empty-state">No folders or comics (.cbz/.cbr) here.</div>';
         return;
       }
-      const [progressMap, favoriteFolderIds, tbrFolderIds] = await Promise.all([fetchProgressMap(items), fetchFavoriteFolderIds(), fetchTBRFolderIds()]);
+      const [progressMap, favoriteFolderIds, tbrFolderIds] = await Promise.all([fetchProgressMap(), fetchFavoriteFolderIds(), fetchTBRFolderIds()]);
       lastListState = { items, progressMap, favoriteFolderIds, openFolderFn: openFolder, emptyMessage: 'No folders or comics (.cbz/.cbr) here.', tbrFolderIds };
       renderFolderList();
-      if (librarySource === 'local') applyLocalCovers(items); // background — fills in real covers without blocking this render
+      if (librarySource === 'local') {
+        applyLocalCovers(items); // background — fills in real covers without blocking this render
+        applyRemoteLocalProgress(items); // background — positions read on other devices
+      }
     } catch (err) {
       list.innerHTML = '<div class="empty-state">' + escapeHtml(err.message || 'Something went wrong.') + '</div>';
     }
@@ -2167,10 +2220,13 @@
         list.innerHTML = '<div class="empty-state">No matches for "' + escapeHtml(query) + '".</div>';
         return;
       }
-      const [progressMap, favoriteFolderIds, tbrFolderIds] = await Promise.all([fetchProgressMap(items), fetchFavoriteFolderIds(), fetchTBRFolderIds()]);
+      const [progressMap, favoriteFolderIds, tbrFolderIds] = await Promise.all([fetchProgressMap(), fetchFavoriteFolderIds(), fetchTBRFolderIds()]);
       lastListState = { items, progressMap, favoriteFolderIds, openFolderFn: openFolderDirect, emptyMessage: 'No matches for "' + query + '".', tbrFolderIds };
       renderFolderList();
-      if (librarySource === 'local') applyLocalCovers(items); // background — fills in real covers without blocking this render
+      if (librarySource === 'local') {
+        applyLocalCovers(items); // background — fills in real covers without blocking this render
+        applyRemoteLocalProgress(items); // background — positions read on other devices
+      }
     } catch (err) {
       list.innerHTML = '<div class="empty-state">' + escapeHtml(err.message || 'Something went wrong.') + '</div>';
     }
@@ -2608,29 +2664,11 @@
   // ---------------------------------------------------------------------
   // Progress sync (Airtable via Cloudflare Worker)
   // ---------------------------------------------------------------------
-  // items (local mode only): the comics about to be rendered, so their
-  // synced positions from other devices can be filled in by filename —
-  // the local cache only knows about comics opened on this device.
-  async function fetchProgressMap(items) {
-    if (librarySource === 'local') {
-      const [map, remote] = await Promise.all([localProgressMap(), fetchRemoteLocalProgress()]);
-      if (remote && items) {
-        const pending = loadProgressQueue();
-        items.forEach((item) => {
-          if (item.kind !== 'file') return;
-          const key = localSyncId(item.id);
-          const r = remoteProgressToUse(remote.get(key), key, pending);
-          if (!r) return;
-          map[item.id] = {
-            ...(map[item.id] || {}),
-            'Last Page': r['Last Page'],
-            'Total Pages': r['Total Pages'],
-            'Finished': !!r['Finished'],
-          };
-        });
-      }
-      return map;
-    }
+  // Local mode returns only what's on this device — synced positions
+  // from other devices are filled in afterwards by
+  // applyRemoteLocalProgress, so a slow Worker never holds up a listing.
+  async function fetchProgressMap() {
+    if (librarySource === 'local') return localProgressMap();
     try {
       const resp = await fetch(WORKER_URL + '/progress');
       if (!resp.ok) return {};
@@ -3513,6 +3551,7 @@
     const id = fields['Drive File ID'];
     queue[id] = { ...(queue[id] || {}), ...fields };
     saveProgressQueue(queue);
+    remoteLocalProgressCache = null; // this write makes any cached synced rows stale
   }
 
   let isFlushingProgressQueue = false;
