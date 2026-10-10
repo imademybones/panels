@@ -55,7 +55,8 @@
   .btn-outline{background:transparent;color:var(--ink);border:1.5px solid var(--border);}
   .connect-local-btn{margin-top:12px;}
   .connect-or{font-size:12px;color:var(--muted);margin:16px 0;text-transform:uppercase;letter-spacing:.05em;}
-  /* Local-folder mode has no Drive/Airtable backing, so anything that
+  /* Local-folder mode has no Drive backing (only reading progress syncs
+     through Airtable — see localSyncId), so anything else that
      reads or writes those services is hidden rather than left to fail
      silently row by row. Favorites and "continue reading" are the two
      exceptions — reimplemented as plain local storage (see
@@ -258,6 +259,7 @@
   }
   .shelf-card:active{transform:scale(0.97);}
   .shelf-card-finished .shelf-cover, .shelf-card-finished .shelf-card-body{opacity:.5;}
+  .shelf-card-missing .shelf-cover, .shelf-card-missing .shelf-card-body{opacity:.5;}
   .shelf-card-dismiss{
     position:absolute;top:6px;right:6px;width:22px;height:22px;border-radius:50%;
     background:rgba(28,26,23,.55);color:#fff;border:none;font-size:13px;line-height:1;
@@ -641,6 +643,11 @@
       <p class="modal-desc" id="settings-storage-desc"></p>
       <div class="progress-track hidden" id="settings-storage-track"><div class="progress-fill" id="settings-storage-fill" style="width:0%"></div></div>
     </div>
+    <div class="settings-section hidden" id="settings-other-devices-section">
+      <div class="settings-label">Read on other devices <span id="settings-other-devices-count"></span></div>
+      <p class="modal-desc">Comics you've opened on another device that aren't in this folder, matched by filename. Copy one over and it'll resume where you left off.</p>
+      <div id="settings-other-devices-list"></div>
+    </div>
     <div class="settings-section" id="settings-library-root-section">
       <div class="settings-label-row">
         <div class="settings-label">Library folder <span id="settings-root-name"></span></div>
@@ -819,10 +826,12 @@
   // 'directory') is what the local-specific code paths key off instead.
   // Favorites and "continue reading" are reimplemented as plain local
   // storage (see loadLocalFavorites/loadLocalContinueReading below) since
-  // both are fully expressible without a server. Everything else backed
-  // by Airtable (TBR, reading orders, stats, cross-device progress sync)
-  // has no local equivalent and is hidden via the body.local-mode CSS
-  // rules rather than half-ported.
+  // both are fully expressible without a server. Reading progress is
+  // additionally synced across devices through the same Airtable
+  // Progress table Drive uses, keyed by filename rather than path (see
+  // localSyncId). Everything else backed by Airtable (TBR, reading
+  // orders, stats) has no local equivalent and is hidden via the
+  // body.local-mode CSS rules rather than half-ported.
   // ---------------------------------------------------------------------
   const LIBRARY_SOURCE_KEY = 'panelsLibrarySource';
   const LOCAL_DB_NAME = 'panelsLocalLibrary';
@@ -1123,6 +1132,84 @@
     const result = { bytes, computedAt: Date.now() };
     localStorage.setItem(LOCAL_LIBRARY_SIZE_KEY, JSON.stringify(result));
     return result;
+  }
+
+  // ---------------------------------------------------------------------
+  // Cross-device sync for local mode. Local comics have no Drive File ID,
+  // and the same comic usually lives at a different path on each device,
+  // so the Progress row is keyed on the filename alone: lowercased, with
+  // the extension dropped and every run of non-letter/digit characters
+  // collapsed to a single '-' ("Absolute Batman 001 (2024).cbz" ->
+  // "local:absolute-batman-001-2024"). That makes a .cbz on one device
+  // match a .cbr of the same name on another, keeps the key safe to drop
+  // into a Worker query string/Airtable formula, and the 'local:' prefix
+  // keeps these rows out of every Drive-mode view (see isLocalSyncId).
+  //
+  // Conflict rule: whatever's in Airtable wins, since every device writes
+  // there — except while this device still has an unsent write queued for
+  // that comic (it was read offline), in which case the local position is
+  // newer by definition.
+  // ---------------------------------------------------------------------
+  const LOCAL_SYNC_PREFIX = 'local:';
+  const LOCAL_SYNC_TIMEOUT_MS = 3000;
+
+  function isLocalSyncId(id) {
+    return typeof id === 'string' && id.startsWith(LOCAL_SYNC_PREFIX);
+  }
+
+  function localSyncId(pathOrName) {
+    if (isLocalSyncId(pathOrName)) return pathOrName;
+    const base = String(pathOrName).split('/').pop();
+    const slug = stripExt(base).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '');
+    return LOCAL_SYNC_PREFIX + slug;
+  }
+
+  // fetch() with a short timeout — local mode is meant to open and
+  // browse instantly, so a slow/absent connection must never hold up a
+  // listing or a comic for longer than this.
+  async function fetchWithTimeout(url, ms) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), ms);
+    try { return await fetch(url, { signal: ctrl.signal }); }
+    finally { clearTimeout(timer); }
+  }
+
+  // Every synced local-comic row, as a Map of sync key -> fields, or null
+  // when the Worker can't be reached (callers then fall back to purely
+  // local data, exactly as before sync existed).
+  async function fetchRemoteLocalProgress() {
+    try {
+      const resp = await fetchWithTimeout(WORKER_URL + '/progress', LOCAL_SYNC_TIMEOUT_MS);
+      if (!resp.ok) return null;
+      const data = await resp.json();
+      const map = new Map();
+      (data.records || []).forEach((r) => {
+        if (isLocalSyncId(r.fields['Drive File ID'])) map.set(r.fields['Drive File ID'], r.fields);
+      });
+      return map;
+    } catch (e) { return null; }
+  }
+
+  // The remote row to trust for this comic, or null if local should win
+  // (no row, no position recorded yet, or an unsent local write pending).
+  function remoteProgressToUse(remoteFields, key, pendingQueue) {
+    if (!remoteFields || typeof remoteFields['Last Page'] !== 'number') return null;
+    if (pendingQueue[key]) return null;
+    return remoteFields;
+  }
+
+  // Index of the comics on this device by sync key, so a row read on
+  // another device can be matched back to a real file here (or flagged
+  // as not on this device). Reuses buildLocalTree's cache.
+  async function localComicsBySyncId() {
+    const index = new Map();
+    try {
+      (await buildLocalTree()).forEach((item) => {
+        const key = localSyncId(item.id);
+        if (!index.has(key)) index.set(key, item);
+      });
+    } catch (e) { /* best effort — treated as nothing found */ }
+    return index;
   }
 
   // Builds a Drive-progressMap-shaped object out of the plain local
@@ -2060,7 +2147,7 @@
         list.innerHTML = '<div class="empty-state">No folders or comics (.cbz/.cbr) here.</div>';
         return;
       }
-      const [progressMap, favoriteFolderIds, tbrFolderIds] = await Promise.all([fetchProgressMap(), fetchFavoriteFolderIds(), fetchTBRFolderIds()]);
+      const [progressMap, favoriteFolderIds, tbrFolderIds] = await Promise.all([fetchProgressMap(items), fetchFavoriteFolderIds(), fetchTBRFolderIds()]);
       lastListState = { items, progressMap, favoriteFolderIds, openFolderFn: openFolder, emptyMessage: 'No folders or comics (.cbz/.cbr) here.', tbrFolderIds };
       renderFolderList();
       if (librarySource === 'local') applyLocalCovers(items); // background — fills in real covers without blocking this render
@@ -2080,7 +2167,7 @@
         list.innerHTML = '<div class="empty-state">No matches for "' + escapeHtml(query) + '".</div>';
         return;
       }
-      const [progressMap, favoriteFolderIds, tbrFolderIds] = await Promise.all([fetchProgressMap(), fetchFavoriteFolderIds(), fetchTBRFolderIds()]);
+      const [progressMap, favoriteFolderIds, tbrFolderIds] = await Promise.all([fetchProgressMap(items), fetchFavoriteFolderIds(), fetchTBRFolderIds()]);
       lastListState = { items, progressMap, favoriteFolderIds, openFolderFn: openFolderDirect, emptyMessage: 'No matches for "' + query + '".', tbrFolderIds };
       renderFolderList();
       if (librarySource === 'local') applyLocalCovers(items); // background — fills in real covers without blocking this render
@@ -2336,6 +2423,37 @@
     });
   }
 
+  // Local mode: every synced row (see localSyncId) whose filename has no
+  // match anywhere in this device's library folder, most recent first.
+  async function renderOtherDevicesSettings() {
+    const listEl = $('settings-other-devices-list');
+    const countEl = $('settings-other-devices-count');
+    countEl.textContent = '';
+    listEl.innerHTML = '<div class="loading-state">Loading…</div>';
+    const remote = await fetchRemoteLocalProgress();
+    if (!remote) {
+      listEl.innerHTML = '<div class="modal-empty">Couldn\'t reach the sync service — check your connection.</div>';
+      return;
+    }
+    const index = await localComicsBySyncId();
+    const missing = [];
+    remote.forEach((f, key) => {
+      if (f['Last Opened'] && !index.has(key)) missing.push(f);
+    });
+    missing.sort((a, b) => (Date.parse(b['Last Opened']) || 0) - (Date.parse(a['Last Opened']) || 0));
+    countEl.textContent = '(' + missing.length + ')';
+    if (missing.length === 0) {
+      listEl.innerHTML = '<div class="modal-empty">Everything you\'ve read elsewhere is already here.</div>';
+      return;
+    }
+    listEl.innerHTML = missing.map((f) => `
+      <div class="cache-item">
+        <div class="name">${escapeHtml(f['Title'] || 'Untitled')}</div>
+        <div class="meta">${f['Finished'] ? 'Finished' : `${f['Last Page'] || 0} / ${f['Total Pages'] || '?'}`}</div>
+      </div>
+    `).join('');
+  }
+
   async function clearAllCachedComics() {
     const list = loadCachedComics();
     await Promise.all(list.map((c) => clearCachedComic(c.id)));
@@ -2354,8 +2472,11 @@
       $('settings-storage-section').classList.remove('hidden');
       $('settings-storage-budget-input').value = localStorageBudgetGB ? String(localStorageBudgetGB) : '';
       renderStorageSettings();
+      $('settings-other-devices-section').classList.remove('hidden');
+      renderOtherDevicesSettings();
       return;
     }
+    $('settings-other-devices-section').classList.add('hidden');
     $('settings-source-name').textContent = '(Google Drive)';
     $('settings-source-desc').textContent = 'Comics are streamed from your connected Drive account.';
     $('btn-switch-source').textContent = 'Use a local folder instead';
@@ -2449,6 +2570,7 @@
         const data = await resp.json();
         (data.records || []).forEach((r) => {
           const f = r.fields;
+          if (isLocalSyncId(f['Drive File ID'])) return; // local-mode rows have their own stats
           if (!f['Finished'] || !f['Finished Date']) return;
           if (f['Finished Date'].startsWith(monthPrefix)) finishedThisMonth++;
           if (f['Finished Date'].startsWith(yearPrefix)) finishedThisYear++;
@@ -2486,8 +2608,29 @@
   // ---------------------------------------------------------------------
   // Progress sync (Airtable via Cloudflare Worker)
   // ---------------------------------------------------------------------
-  async function fetchProgressMap() {
-    if (librarySource === 'local') return localProgressMap();
+  // items (local mode only): the comics about to be rendered, so their
+  // synced positions from other devices can be filled in by filename —
+  // the local cache only knows about comics opened on this device.
+  async function fetchProgressMap(items) {
+    if (librarySource === 'local') {
+      const [map, remote] = await Promise.all([localProgressMap(), fetchRemoteLocalProgress()]);
+      if (remote && items) {
+        const pending = loadProgressQueue();
+        items.forEach((item) => {
+          if (item.kind !== 'file') return;
+          const key = localSyncId(item.id);
+          const r = remoteProgressToUse(remote.get(key), key, pending);
+          if (!r) return;
+          map[item.id] = {
+            ...(map[item.id] || {}),
+            'Last Page': r['Last Page'],
+            'Total Pages': r['Total Pages'],
+            'Finished': !!r['Finished'],
+          };
+        });
+      }
+      return map;
+    }
     try {
       const resp = await fetch(WORKER_URL + '/progress');
       if (!resp.ok) return {};
@@ -2615,6 +2758,7 @@
       if (!resp.ok) { renderShelfError(wrap, loadContinueReading); return; }
       const data = await resp.json();
       let records = (data.records || [])
+        .filter(r => !isLocalSyncId(r.fields['Drive File ID']))
         .filter(r => r.fields['Last Opened'] && !r.fields['Dismissed'] && !r.fields['Finished'])
         .sort((a, b) => new Date(b.fields['Last Opened']) - new Date(a.fields['Last Opened']))
         .slice(0, 8);
@@ -2664,29 +2808,84 @@
     }
   }
 
-  // Local-mode counterpart to loadContinueReading() — built entirely
-  // from the local resume-position cache (panelsCachedComics), no
-  // network involved. Reuses the exact same shelf-card markup/CSS as
-  // Drive's version; only the data source and click/dismiss wiring
-  // differ (local ids resolve on demand via resolveLocalHandle, through
-  // openComic()).
+  // Local-mode counterpart to loadContinueReading(). Renders straight
+  // away from the local resume-position cache (panelsCachedComics), then
+  // re-renders once synced rows from other devices arrive (see
+  // localSyncId): a comic read further elsewhere picks up that position,
+  // and one that isn't in this device's folder at all still shows up,
+  // dimmed as "Not on this device", so you know what to copy across.
+  // Reuses the exact same shelf-card markup/CSS as Drive's version; local
+  // ids resolve on demand via resolveLocalHandle, through openComic().
+  let localContinueGeneration = 0;
   function loadLocalContinueReading() {
+    const generation = ++localContinueGeneration;
+    const entries = loadCachedComics()
+      .filter((c) => c.totalPages)
+      .map((c) => ({
+        key: localSyncId(c.id), id: c.id, name: c.name, lastPage: c.lastPage, totalPages: c.totalPages,
+        finished: !!c.finished, dismissed: !!c.dismissed, sortAt: c.lastAccessedAt || 0, missing: false,
+      }));
+    renderLocalContinueShelf(entries);
+    mergeRemoteContinueReading(entries).then((merged) => {
+      if (merged && generation === localContinueGeneration && librarySource === 'local') renderLocalContinueShelf(merged);
+    });
+  }
+
+  async function mergeRemoteContinueReading(entries) {
+    const remote = await fetchRemoteLocalProgress();
+    if (!remote || remote.size === 0) return null;
+    const pending = loadProgressQueue();
+    const byKey = new Map(entries.map((e) => [e.key, e]));
+    const merged = entries.slice();
+    const unmatched = [];
+    remote.forEach((fields, key) => {
+      const r = remoteProgressToUse(fields, key, pending);
+      if (!r) return;
+      const remoteAt = Date.parse(r['Last Opened']) || 0;
+      const existing = byKey.get(key);
+      if (existing) {
+        existing.lastPage = r['Last Page'];
+        existing.totalPages = r['Total Pages'] || existing.totalPages;
+        existing.finished = !!r['Finished'];
+        existing.dismissed = !!r['Dismissed'];
+        existing.sortAt = Math.max(existing.sortAt, remoteAt);
+      } else if (r['Last Opened'] && r['Total Pages'] && !r['Finished'] && !r['Dismissed']) {
+        unmatched.push({
+          key, id: null, name: r['Title'] || key.slice(LOCAL_SYNC_PREFIX.length), lastPage: r['Last Page'], totalPages: r['Total Pages'],
+          finished: false, dismissed: false, sortAt: remoteAt, missing: true,
+        });
+      }
+    });
+    if (unmatched.length) {
+      // Only walk the library when there's actually something to match —
+      // read on another device, never opened on this one.
+      const index = await localComicsBySyncId();
+      unmatched.forEach((e) => {
+        const item = index.get(e.key);
+        if (item) { e.id = item.id; e.name = item.name; e.missing = false; }
+        merged.push(e);
+      });
+    }
+    return merged;
+  }
+
+  function renderLocalContinueShelf(entries) {
     const wrap = $('continue-shelf-wrap');
-    const records = loadCachedComics()
-      .filter((c) => c.totalPages && !c.finished && !c.dismissed)
-      .sort((a, b) => b.lastAccessedAt - a.lastAccessedAt)
+    const records = entries
+      .filter((e) => !e.finished && !e.dismissed)
+      .sort((a, b) => b.sortAt - a.sortAt)
       .slice(0, 8);
     if (records.length === 0) { wrap.innerHTML = ''; return; }
     let html = '<div class="shelf-title">Continue reading</div><div class="shelf">';
-    records.forEach((meta) => {
+    records.forEach((meta, idx) => {
       const pct = meta.totalPages ? Math.min(100, Math.round(100 * (meta.lastPage || 0) / meta.totalPages)) : 0;
       html += `
-        <div class="shelf-card" data-item-id="${escapeHtml(meta.id)}">
+        <div class="shelf-card${meta.missing ? ' shelf-card-missing' : ''}" data-entry-idx="${idx}">
           <button class="shelf-card-dismiss" aria-label="Remove from Continue reading">✕</button>
           <div class="shelf-cover">📕</div>
           <div class="shelf-card-body">
             <div class="name">${escapeHtml(stripExt(meta.name))}</div>
-            <div class="meta">${meta.lastPage || 0} / ${meta.totalPages || '?'}</div>
+            <div class="meta">${meta.missing ? 'Not on this device' : `${meta.lastPage || 0} / ${meta.totalPages || '?'}`}</div>
             <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
           </div>
         </div>`;
@@ -2694,21 +2893,27 @@
     html += '</div>';
     wrap.innerHTML = html;
     wrap.querySelectorAll('.shelf-card').forEach((card) => {
-      const id = card.getAttribute('data-item-id');
-      getLocalCoverUrl(id).then((cover) => {
-        if (!cover) return;
-        const coverEl = card.querySelector('.shelf-cover');
-        coverEl.innerHTML = `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />`;
-        card.querySelector('.name').remove();
-      });
+      const meta = records[Number(card.getAttribute('data-entry-idx'))];
+      if (meta.id) {
+        getLocalCoverUrl(meta.id).then((cover) => {
+          if (!cover || !card.isConnected) return;
+          const coverEl = card.querySelector('.shelf-cover');
+          coverEl.innerHTML = `<img class="cover-thumb" src="${escapeHtml(cover)}" alt="" />`;
+          card.querySelector('.name').remove();
+        });
+      }
       card.addEventListener('click', () => {
-        const meta = findCachedComicMeta(id);
+        if (meta.missing) {
+          showToast('"' + stripExt(meta.name) + '" isn\'t in this device\'s library folder — add it and you\'ll resume at page ' + ((meta.lastPage || 0) + 1) + '.');
+          return;
+        }
         readNextContext = null;
-        openComic({ id, name: meta ? meta.name : id, kind: 'file' });
+        openComic({ id: meta.id, name: meta.name, kind: 'file' });
       });
       card.querySelector('.shelf-card-dismiss').addEventListener('click', (e) => {
         e.stopPropagation();
-        setLocalComicDismissed(id, true);
+        if (meta.id) setLocalComicDismissed(meta.id, true);
+        saveProgress({ 'Drive File ID': meta.key, 'Dismissed': true }); // so other devices drop it too
         card.remove();
         if (!wrap.querySelector('.shelf-card')) wrap.innerHTML = '';
       });
@@ -2771,7 +2976,7 @@
       ]);
       if (!progressResp.ok || !foldersResp.ok) throw new Error('Worker request failed');
       const comics = (await progressResp.json()).records
-        .filter((r) => r.fields['Favorite'])
+        .filter((r) => r.fields['Favorite'] && !isLocalSyncId(r.fields['Drive File ID']))
         .map((r) => ({ type: 'comic', id: r.fields['Drive File ID'], name: r.fields['Title'] || 'Untitled', cover: coverUrl(r.fields), finished: !!r.fields['Finished'] }));
       const folders = (await foldersResp.json()).records
         .map((r) => ({ type: 'folder', id: r.fields['Drive Folder ID'], name: r.fields['Name'] || 'Untitled', cover: null, finished: false }));
@@ -2837,7 +3042,7 @@
       ]);
       if (!progressResp.ok || !foldersResp.ok) throw new Error('Worker request failed');
       const comics = (await progressResp.json()).records
-        .filter((r) => r.fields['Want To Read'])
+        .filter((r) => r.fields['Want To Read'] && !isLocalSyncId(r.fields['Drive File ID']))
         .map((r) => ({ type: 'comic', id: r.fields['Drive File ID'], name: r.fields['Title'] || 'Untitled', cover: coverUrl(r.fields), finished: !!r.fields['Finished'] }));
       const folders = (await foldersResp.json()).records
         .map((r) => ({ type: 'folder', id: r.fields['Drive Folder ID'], name: r.fields['Name'] || 'Untitled', cover: null, finished: false }));
@@ -3300,9 +3505,13 @@
     localStorage.setItem(PROGRESS_QUEUE_KEY, JSON.stringify(queue));
   }
 
+  // Merges into any entry already queued for the same comic rather than
+  // replacing it, so two quick writes (closeReader's page save followed
+  // by its 'Finished' save) can't drop the first one's fields.
   function queuePendingProgress(fields) {
     const queue = loadProgressQueue();
-    queue[fields['Drive File ID']] = fields;
+    const id = fields['Drive File ID'];
+    queue[id] = { ...(queue[id] || {}), ...fields };
     saveProgressQueue(queue);
   }
 
@@ -3313,15 +3522,20 @@
     const queue = loadProgressQueue();
     for (const driveId of Object.keys(queue)) {
       try {
+        const body = JSON.stringify({ fields: queue[driveId] });
         const resp = await fetch(WORKER_URL + '/progress', {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ fields: queue[driveId] }),
+          body,
         });
         if (resp.ok) {
+          // Only clear it if nothing new was merged in while this request
+          // was in flight — otherwise leave it for the follow-up flush.
           const current = loadProgressQueue();
-          delete current[driveId];
-          saveProgressQueue(current);
+          if (current[driveId] && JSON.stringify({ fields: current[driveId] }) === body) {
+            delete current[driveId];
+            saveProgressQueue(current);
+          }
         }
         // non-2xx response: leave it queued, try again on the next flush
       } catch (e) {
@@ -3329,10 +3543,21 @@
       }
     }
     isFlushingProgressQueue = false;
+    // A write that landed mid-flush (merged into an entry already being
+    // sent) is still queued — go round once more to send it.
+    const remaining = loadProgressQueue();
+    if (Object.keys(remaining).some((id) => !(id in queue) || JSON.stringify(remaining[id]) !== JSON.stringify(queue[id]))) {
+      flushProgressQueue();
+    }
   }
 
+  // Local comics are keyed by filename instead of Drive File ID (see
+  // localSyncId) — callers just pass the comic's local path as usual.
   function saveProgress(fields) {
-    if (librarySource === 'local') return; // local comics have no 'Drive File ID' to key an Airtable row on
+    if (librarySource === 'local') {
+      if (!fields['Drive File ID']) return;
+      fields = { ...fields, 'Drive File ID': localSyncId(fields['Drive File ID']) };
+    }
     queuePendingProgress(fields); // persisted first — survives a dropped connection
     flushProgressQueue();
   }
@@ -3846,11 +4071,13 @@
 
       let resumeAt = 0;
       if (isLocal) {
-        // No Airtable to resolve resume position or a cover against —
-        // just the plain local resume-position cache (see below). Marking
-        // it pinned is what lights up the "Downloaded" badge in the
-        // library row (see buildItemRow) — every local comic is, by
-        // definition, already on-device once it's been opened.
+        // Resume position comes from the synced Progress row (matched by
+        // filename — see localSyncId) when another device has read
+        // further, else the plain local resume-position cache. Covers
+        // stay local-only. Marking it pinned is what lights up the
+        // "Downloaded" badge in the library row (see buildItemRow) —
+        // every local comic is, by definition, already on-device once
+        // it's been opened.
         recordCachedComicAccess(item, { pinned: true });
         setLocalComicFinished(item.id, false); // re-reading a finished comic un-dims it until it's finished again
         generateLocalCover(item.id, pages[0].url); // best-effort, not awaited — keeps opening the reader instant
@@ -3858,6 +4085,16 @@
         if (cachedMeta && typeof cachedMeta.lastPage === 'number') {
           resumeAt = Math.min(cachedMeta.lastPage, pages.length - 1);
         }
+        const key = localSyncId(item.id);
+        try {
+          const resp = await fetchWithTimeout(WORKER_URL + '/progress?driveId=' + encodeURIComponent(key), LOCAL_SYNC_TIMEOUT_MS);
+          if (resp.ok) {
+            const data = await resp.json();
+            const r = remoteProgressToUse((data.records || [])[0] && data.records[0].fields, key, loadProgressQueue());
+            if (r) resumeAt = Math.min(r['Last Page'], pages.length - 1);
+          }
+        } catch (e) { /* offline or slow — local position stands */ }
+        saveProgress({ 'Drive File ID': item.id, 'Finished': false }); // mirrors setLocalComicFinished above on other devices
       } else {
         // resume from saved progress, if any. If the Worker's unreachable
         // (no signal, or just no Drive/Worker access right now), fall back
@@ -4122,6 +4359,11 @@
         });
       } else {
         setLocalComicFinished(currentComic.id, true);
+        saveProgress({
+          'Drive File ID': currentComic.id,
+          'Finished': true,
+          'Finished Date': todayISO(),
+        });
       }
       let nextItem = null, nextContext = null;
       if (readNextContext && readNextContext.index >= 0 && readNextContext.index + 1 < readNextContext.items.length) {
