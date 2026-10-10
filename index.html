@@ -643,6 +643,13 @@
       <p class="modal-desc" id="settings-storage-desc"></p>
       <div class="progress-track hidden" id="settings-storage-track"><div class="progress-fill" id="settings-storage-fill" style="width:0%"></div></div>
     </div>
+    <div class="settings-section hidden" id="settings-sync-status-section">
+      <div class="settings-label-row">
+        <div class="settings-label">Sync status</div>
+        <button class="link-btn" id="btn-sync-test">Test now</button>
+      </div>
+      <div id="settings-sync-status-list"></div>
+    </div>
     <div class="settings-section hidden" id="settings-other-devices-section">
       <div class="settings-label">Read on other devices <span id="settings-other-devices-count"></span></div>
       <p class="modal-desc">Comics you've opened on another device that aren't in this folder, matched by filename. Copy one over and it'll resume where you left off.</p>
@@ -1188,6 +1195,37 @@
   // shelf, the folder listing and Settings for a short while, and
   // dropped as soon as this device queues a write of its own (see
   // queuePendingProgress) so a stale copy never overrides it.
+  // Last outcome of each kind of sync request, kept in localStorage and
+  // shown under Settings → Sync status, so a sync problem on a phone or
+  // tablet (no dev tools) can be read straight off the screen.
+  const SYNC_STATUS_KEY = 'panelsSyncStatus';
+  const SYNC_BUILD = '2026-10-10.3'; // bump with sync changes — confirms a device is running this version
+
+  function loadSyncStatus() {
+    try { return JSON.parse(localStorage.getItem(SYNC_STATUS_KEY)) || {}; }
+    catch (e) { return {}; }
+  }
+
+  function recordSyncStatus(kind, info) {
+    try {
+      const status = loadSyncStatus();
+      status[kind] = { ...info, at: Date.now() };
+      localStorage.setItem(SYNC_STATUS_KEY, JSON.stringify(status));
+    } catch (e) { /* diagnostics only */ }
+  }
+
+  // Short readable reason for a failed fetch: the Worker's/Airtable's own
+  // error text when there is one, else the HTTP status.
+  async function describeBadResponse(resp) {
+    let text = '';
+    try { text = (await resp.text()).slice(0, 300); } catch (e) { /* no body */ }
+    return 'HTTP ' + resp.status + (text ? ' — ' + text : '');
+  }
+
+  function describeFetchError(e, timeoutMs) {
+    return e && e.name === 'AbortError' ? 'timed out after ' + Math.round(timeoutMs / 1000) + 's' : 'network error: ' + ((e && e.message) || e);
+  }
+
   let remoteLocalProgressCache = null; // { at, promise }
   function fetchRemoteLocalProgress() {
     if (remoteLocalProgressCache && Date.now() - remoteLocalProgressCache.at < LOCAL_SYNC_LIST_CACHE_MS) {
@@ -1195,15 +1233,26 @@
     }
     const promise = (async () => {
       try {
+        const started = Date.now();
         const resp = await fetchWithTimeout(WORKER_URL + '/progress?prefix=' + encodeURIComponent(LOCAL_SYNC_PREFIX), LOCAL_SYNC_LIST_TIMEOUT_MS);
-        if (!resp.ok) return null;
+        if (!resp.ok) {
+          recordSyncStatus('read', { ok: false, detail: await describeBadResponse(resp) });
+          return null;
+        }
         const data = await resp.json();
         const map = new Map();
         (data.records || []).forEach((r) => {
           if (isLocalSyncId(r.fields['Drive File ID'])) map.set(r.fields['Drive File ID'], r.fields);
         });
+        recordSyncStatus('read', {
+          ok: true,
+          detail: map.size + ' synced comic' + (map.size === 1 ? '' : 's') + ' (' + (data.records || []).length + ' rows returned) in ' + ((Date.now() - started) / 1000).toFixed(1) + 's',
+        });
         return map;
-      } catch (e) { return null; }
+      } catch (e) {
+        recordSyncStatus('read', { ok: false, detail: describeFetchError(e, LOCAL_SYNC_LIST_TIMEOUT_MS) });
+        return null;
+      }
     })();
     const entry = { at: Date.now(), promise };
     remoteLocalProgressCache = entry;
@@ -2479,6 +2528,33 @@
     });
   }
 
+  function renderSyncStatusSettings() {
+    const status = loadSyncStatus();
+    const pendingCount = Object.keys(loadProgressQueue()).filter(isLocalSyncId).length;
+    const line = (label, s) => `
+      <div class="cache-item">
+        <div class="name">${s ? (s.ok ? '✅ ' : '⚠️ ') : ''}${escapeHtml(label)}: ${s ? escapeHtml(s.detail) : 'nothing yet'}</div>
+        <div class="meta">${s ? escapeHtml(new Date(s.at).toLocaleString()) : ''}</div>
+      </div>`;
+    $('settings-sync-status-list').innerHTML =
+      line('Last save', status.write) +
+      line('Last list load', status.read) +
+      line('Last comic open', status.open) +
+      line('Waiting to send', { ok: pendingCount === 0, detail: pendingCount + ' unsent update' + (pendingCount === 1 ? '' : 's'), at: Date.now() }) +
+      line('App version', { ok: true, detail: SYNC_BUILD + ' · ' + location.origin, at: Date.now() });
+  }
+
+  // Forces a fresh list load and a flush of anything queued, then
+  // re-renders both sync sections with the outcome.
+  async function runSyncTest() {
+    $('btn-sync-test').disabled = true;
+    remoteLocalProgressCache = null;
+    await Promise.all([fetchRemoteLocalProgress(), flushProgressQueue()]);
+    renderSyncStatusSettings();
+    renderOtherDevicesSettings();
+    $('btn-sync-test').disabled = false;
+  }
+
   // Local mode: every synced row (see localSyncId) whose filename has no
   // match anywhere in this device's library folder, most recent first.
   async function renderOtherDevicesSettings() {
@@ -2529,10 +2605,13 @@
       $('settings-storage-budget-input').value = localStorageBudgetGB ? String(localStorageBudgetGB) : '';
       renderStorageSettings();
       $('settings-other-devices-section').classList.remove('hidden');
+      $('settings-sync-status-section').classList.remove('hidden');
+      renderSyncStatusSettings();
       renderOtherDevicesSettings();
       return;
     }
     $('settings-other-devices-section').classList.add('hidden');
+    $('settings-sync-status-section').classList.add('hidden');
     $('settings-source-name').textContent = '(Google Drive)';
     $('settings-source-desc').textContent = 'Comics are streamed from your connected Drive account.';
     $('btn-switch-source').textContent = 'Use a local folder instead';
@@ -3568,6 +3647,7 @@
           body,
         });
         if (resp.ok) {
+          recordSyncStatus('write', { ok: true, detail: 'saved ' + driveId });
           // Only clear it if nothing new was merged in while this request
           // was in flight — otherwise leave it for the follow-up flush.
           const current = loadProgressQueue();
@@ -3575,9 +3655,12 @@
             delete current[driveId];
             saveProgressQueue(current);
           }
+        } else {
+          // non-2xx response: leave it queued, try again on the next flush
+          recordSyncStatus('write', { ok: false, detail: driveId + ': ' + await describeBadResponse(resp) });
         }
-        // non-2xx response: leave it queued, try again on the next flush
       } catch (e) {
+        recordSyncStatus('write', { ok: false, detail: driveId + ': ' + describeFetchError(e) });
         break; // offline — stop this pass, remaining entries stay queued
       }
     }
@@ -4129,10 +4212,19 @@
           const resp = await fetchWithTimeout(WORKER_URL + '/progress?driveId=' + encodeURIComponent(key), LOCAL_SYNC_TIMEOUT_MS);
           if (resp.ok) {
             const data = await resp.json();
-            const r = remoteProgressToUse((data.records || [])[0] && data.records[0].fields, key, loadProgressQueue());
+            const row = (data.records || [])[0];
+            const r = remoteProgressToUse(row && row.fields, key, loadProgressQueue());
             if (r) resumeAt = Math.min(r['Last Page'], pages.length - 1);
+            recordSyncStatus('open', {
+              ok: true,
+              detail: key + ': ' + (!row ? 'no synced row yet' : r ? 'resumed at page ' + (resumeAt + 1) : 'kept this device\'s position'),
+            });
+          } else {
+            recordSyncStatus('open', { ok: false, detail: key + ': ' + await describeBadResponse(resp) });
           }
-        } catch (e) { /* offline or slow — local position stands */ }
+        } catch (e) {
+          recordSyncStatus('open', { ok: false, detail: key + ': ' + describeFetchError(e, LOCAL_SYNC_TIMEOUT_MS) }); // offline or slow — local position stands
+        }
         saveProgress({ 'Drive File ID': item.id, 'Finished': false }); // mirrors setLocalComicFinished above on other devices
       } else {
         // resume from saved progress, if any. If the Worker's unreachable
@@ -4753,6 +4845,7 @@
 
   $('btn-connect').addEventListener('click', connectDrive);
   $('btn-use-local').addEventListener('click', useLocalFolder);
+  $('btn-sync-test').addEventListener('click', runSyncTest);
   $('btn-switch-source').addEventListener('click', () => {
     if (librarySource === 'local') {
       librarySource = 'drive';
